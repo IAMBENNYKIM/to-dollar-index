@@ -1,0 +1,32 @@
+# 환경 변수 / 시크릿
+.env
+.env.local
+.env*.local
+
+# KIS 토큰 캐시
+.kis_token_cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Vercel
+.vercel/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
