@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "to-dollar-index-collector"
+version = "0.1.0"
+description = "KIS 오픈API 주가/환율 일일 종가를 Supabase에 적재하는 수집 배치"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "supabase>=2,<3",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "respx",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
