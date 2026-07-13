@@ -1,103 +1,189 @@
-import Image from "next/image";
+import Link from "next/link";
+import { ChevronRight } from "lucide-react";
+import {
+  fetchActiveIndicators,
+  fetchExchangeRateHistory,
+} from "@/lib/indicatorQueries";
+import type { ExchangeRatePoint, Indicator } from "@/lib/types";
+import {
+  getCurrentRate,
+  getDailyChange,
+  getRangeChangePercent,
+} from "@/lib/exchangeRateStats";
+import ExchangeRateChart from "@/components/charts/ExchangeRateChart";
+import StatTile, {
+  type StatTileDelta,
+  type StatTileDeltaDirection,
+} from "@/components/StatTile";
+import {
+  Card,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 
-export default function Home() {
+// ISR: 1시간마다 재생성.
+export const revalidate = 3600;
+
+const RATE_FORMATTER = new Intl.NumberFormat("ko-KR", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const PERCENT_FORMATTER = new Intl.NumberFormat("ko-KR", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+  signDisplay: "exceptZero",
+});
+
+/** 절대 변동값을 부호와 함께 "±1,234.56" 형태로 포맷한다. */
+function formatSignedRate(value: number): string {
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}${RATE_FORMATTER.format(Math.abs(value))}`;
+}
+
+function directionOf(value: number): StatTileDeltaDirection {
+  if (value > 0) return "up";
+  if (value < 0) return "down";
+  return "flat";
+}
+
+/** 변동률(%) 하나로 이루어진 delta 를 만든다. null 이면 undefined 반환(타일이 "—" 표시). */
+function percentDelta(percent: number | null): StatTileDelta | undefined {
+  if (percent === null) {
+    return undefined;
+  }
+  return {
+    text: `${PERCENT_FORMATTER.format(percent)}%`,
+    direction: directionOf(percent),
+  };
+}
+
+export default async function Home() {
+  // 빌드 타임에 Supabase 환경변수가 없으면 조회가 throw 되므로 반드시 폴백한다.
+  let rateHistory: ExchangeRatePoint[] = [];
+  let indicators: Indicator[] = [];
+
+  try {
+    rateHistory = await fetchExchangeRateHistory();
+  } catch {
+    rateHistory = [];
+  }
+
+  try {
+    indicators = await fetchActiveIndicators();
+  } catch {
+    indicators = [];
+  }
+
+  const currentRate = getCurrentRate(rateHistory);
+  const dailyChange = getDailyChange(rateHistory);
+  const change30d = getRangeChangePercent(rateHistory, 30);
+  const change1y = getRangeChangePercent(rateHistory, 365);
+  const hasData = rateHistory.length > 0;
+
+  const dailyDelta: StatTileDelta | undefined = dailyChange
+    ? {
+        text:
+          dailyChange.percent === null
+            ? `${formatSignedRate(dailyChange.absolute)}원`
+            : `${formatSignedRate(dailyChange.absolute)}원 (${PERCENT_FORMATTER.format(dailyChange.percent)}%)`,
+        direction: directionOf(dailyChange.absolute),
+      }
+    : undefined;
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+    <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-8 px-4 py-10 sm:px-8">
+      <header className="flex flex-col gap-2">
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+          원/달러 환율 지수
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          원/달러(USD·KRW) 환율의 최근 흐름과 등록된 지표의 원화·달러 환산 성과를 한눈에 확인하세요.
+        </p>
+      </header>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      {/* 통계 타일 행 */}
+      <section
+        aria-label="환율 요약 통계"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
+      >
+        <StatTile
+          label="현재 환율"
+          value={currentRate === null ? "—" : RATE_FORMATTER.format(currentRate)}
+          unit={currentRate === null ? undefined : "원"}
+        />
+        <StatTile
+          label="전일 대비"
+          value={
+            dailyChange === null ? "—" : formatSignedRate(dailyChange.absolute)
+          }
+          unit={dailyChange === null ? undefined : "원"}
+          delta={dailyDelta}
+        />
+        <StatTile
+          label="30일 변동률"
+          value={change30d === null ? "—" : `${PERCENT_FORMATTER.format(change30d)}%`}
+          delta={percentDelta(change30d)}
+        />
+        <StatTile
+          label="1년 변동률"
+          value={change1y === null ? "—" : `${PERCENT_FORMATTER.format(change1y)}%`}
+          delta={percentDelta(change1y)}
+        />
+      </section>
+
+      {/* 환율 차트 */}
+      <section aria-label="환율 시계열 차트">
+        <Card className="gap-4 px-5 py-5">
+          <CardHeader className="px-0">
+            <CardTitle>원/달러 환율 추이</CardTitle>
+            <CardDescription>
+              {hasData
+                ? "USD·KRW 종가 기준 시계열"
+                : "환율 데이터를 불러오지 못했습니다."}
+            </CardDescription>
+          </CardHeader>
+          <ExchangeRateChart points={rateHistory} />
+        </Card>
+      </section>
+
+      {/* 등록 지표 목록 */}
+      <section aria-label="등록 지표" className="flex flex-col gap-4">
+        <h2 className="text-lg font-semibold text-foreground">등록 지표</h2>
+        {indicators.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            등록된 지표가 없습니다.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {indicators.map((indicator) => (
+              <Link
+                key={indicator.id}
+                href={`/indicators/${indicator.id}`}
+                className="group block rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Card className="gap-2 px-5 transition-colors group-hover:bg-muted/50">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-col gap-1">
+                      <span className="font-medium text-foreground">
+                        {indicator.displayName}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {indicator.indicatorType} · {indicator.sourceCode}
+                      </span>
+                    </div>
+                    <ChevronRight
+                      className="size-5 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
+                      aria-hidden
+                    />
+                  </div>
+                </Card>
+              </Link>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
