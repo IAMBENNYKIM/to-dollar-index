@@ -1,0 +1,36 @@
+# 일일 종가 수집 배치
+# KIS_BASE_URL 실전 도메인 값: https://openapi.koreainvestment.com:9443
+# (config.load_config가 실전 도메인이 아니면 에러를 냄. Secret에 위 값을 설정할 것)
+name: daily-collect
+
+on:
+  schedule:
+    # UTC 10:00 = KST 19:00, 평일(월~금)
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: collector/pyproject.toml
+
+      - name: Install collector
+        run: pip install -e ./collector
+
+      - name: Run daily collect
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python -m collector.main daily
