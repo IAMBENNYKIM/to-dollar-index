@@ -20,16 +20,12 @@ CURRENCY_PAIR_USD_KRW = "USD_KRW"
 # docstring "N: 해외지수, X 환율, I: 국채, S:금선물".
 MARKET_DIV_CODE_EXCHANGE_RATE = "X"
 
-# ⚠️ 원/달러의 정확한 FID_INPUT_ISCD 는 공식 문서·예제에 미확정(프로젝트의 알려진 리스크).
-# 위 예제 docstring은 X=환율만 명시하고 환율 종목코드의 구체 값은 제공하지 않는다
-# (예제의 FID_INPUT_ISCD 샘플은 지수 코드 ".DJI", "QQQ" 뿐).
-# 아래 값은 후보이며, 실계좌 dry-run으로 최종 확정해야 한다. 확정 시 이 상수만 교체하면 된다.
+# 원/달러 환율 종목코드. 모의 도메인 실호출(scripts/probe_kis.py)로 확정: 후보 6종 중
+# 'FX@KRW'만 유효한 시계열(output2)을 반환했고 값도 원/달러 환율과 일치했다(예: 2026-07-13 종가 1493.8).
 USD_KRW_INPUT_ISCD = "FX@KRW"
 
-# 응답 output2 필드명(해외지수/환율 계열). 종가는 ovrs_nmix_prpr.
-# 출처: 위 저장소 chk_inquire_daily_chartprice.py 의 output2 필드 매핑
-# (ovrs_nmix_prpr=현재가, ovrs_nmix_oprc/hgpr/lwpr=시/고/저, stck_bsop_date=영업일).
-# 필드명이 확정 시 다르면 아래 상수만 교체하면 된다.
+# 응답 output2 필드명(해외지수/환율 계열). 종가 ovrs_nmix_prpr, 영업일 stck_bsop_date.
+# probe 실응답에서 확인: {'stck_bsop_date': '20260713', 'ovrs_nmix_prpr': '1493.8000', ...}.
 # exchange_rates 테이블은 종가만 저장하므로 종가 필드만 파싱한다.
 FIELD_BUSINESS_DATE = "stck_bsop_date"
 FIELD_CLOSE_RATE = "ovrs_nmix_prpr"
