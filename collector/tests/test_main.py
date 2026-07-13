@@ -1,0 +1,338 @@
+from __future__ import annotations
+
+import argparse
+from datetime import date
+from decimal import Decimal
+
+import pytest
+
+from collector import main as main_module
+
+FIXED_TODAY = date(2026, 7, 13)
+
+
+class FakeSupabaseClient:
+    """수집 오케스트레이션 테스트용 placeholder. DB 접근 함수는 전부 monkeypatch로 대체된다."""
+
+
+def build_backfill_arguments(
+    start_date: str = "2026-01-01",
+    indicator: str | None = None,
+    dry_run: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        start_date=start_date, indicator=indicator, dry_run=dry_run
+    )
+
+
+def build_daily_arguments(dry_run: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(dry_run=dry_run)
+
+
+def build_stock_indicator(
+    indicator_id: str, source_code: str, display_name: str
+) -> dict:
+    return {
+        "id": indicator_id,
+        "source_code": source_code,
+        "display_name": display_name,
+    }
+
+
+def build_exchange_rate_row(rate_date: date) -> dict:
+    return {
+        "currency_pair": "USD_KRW",
+        "rate_date": rate_date,
+        "close_rate": Decimal("1350"),
+    }
+
+
+def build_stock_price_row(indicator_id: str, price_date: date) -> dict:
+    return {
+        "indicator_id": indicator_id,
+        "price_date": price_date,
+        "close_price": Decimal("70000"),
+    }
+
+
+@pytest.fixture
+def patched_runtime(monkeypatch):
+    """토큰/클라이언트 생성과 오늘 날짜를 목킹하고, 호출 기록 컨테이너를 제공한다."""
+    recorder: dict[str, list] = {
+        "exchange_fetch_ranges": [],
+        "stock_fetch_calls": [],
+        "exchange_upsert_calls": [],
+        "stock_upsert_calls": [],
+    }
+
+    monkeypatch.setattr(main_module, "load_config", lambda: object())
+    monkeypatch.setattr(main_module, "get_access_token", lambda config: "test-token")
+    monkeypatch.setattr(
+        main_module, "KisClient", lambda config, access_token: object()
+    )
+    monkeypatch.setattr(
+        main_module, "create_supabase_client", lambda config: FakeSupabaseClient()
+    )
+    monkeypatch.setattr(main_module, "get_today_date", lambda: FIXED_TODAY)
+
+    return recorder
+
+
+def test_backfill_collects_exchange_rate_before_stocks(patched_runtime, monkeypatch):
+    call_order: list[str] = []
+
+    def fake_fetch_exchange(kis_client, start_date, end_date):
+        call_order.append("exchange")
+        patched_runtime["exchange_fetch_ranges"].append((start_date, end_date))
+        return [build_exchange_rate_row(date(2026, 1, 2))]
+
+    def fake_fetch_stock(kis_client, indicator_id, stock_code, start_date, end_date):
+        call_order.append(f"stock:{stock_code}")
+        patched_runtime["stock_fetch_calls"].append((stock_code, start_date, end_date))
+        return [build_stock_price_row(indicator_id, date(2026, 1, 2))]
+
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: [build_stock_indicator("id-1", "005930", "삼성전자")],
+    )
+    monkeypatch.setattr(main_module, "fetch_usd_krw_exchange_rates", fake_fetch_exchange)
+    monkeypatch.setattr(main_module, "fetch_stock_daily_prices", fake_fetch_stock)
+    monkeypatch.setattr(
+        main_module, "upsert_exchange_rates",
+        lambda client, rows: patched_runtime["exchange_upsert_calls"].append(rows) or len(rows),
+    )
+    monkeypatch.setattr(
+        main_module, "upsert_daily_prices",
+        lambda client, rows: patched_runtime["stock_upsert_calls"].append(rows) or len(rows),
+    )
+
+    main_module.run_backfill(build_backfill_arguments())
+
+    assert call_order == ["exchange", "stock:005930"]
+    # backfill 구간은 --from ~ 오늘.
+    assert patched_runtime["exchange_fetch_ranges"] == [(date(2026, 1, 1), FIXED_TODAY)]
+    assert patched_runtime["stock_fetch_calls"] == [("005930", date(2026, 1, 1), FIXED_TODAY)]
+    assert len(patched_runtime["exchange_upsert_calls"]) == 1
+    assert len(patched_runtime["stock_upsert_calls"]) == 1
+
+
+def test_backfill_indicator_filter_stock_only(patched_runtime, monkeypatch):
+    call_order: list[str] = []
+
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: [
+            build_stock_indicator("id-1", "005930", "삼성전자"),
+            build_stock_indicator("id-2", "000660", "SK하이닉스"),
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: call_order.append("exchange") or [],
+    )
+
+    def fake_fetch_stock(kis_client, indicator_id, stock_code, start_date, end_date):
+        call_order.append(f"stock:{stock_code}")
+        return [build_stock_price_row(indicator_id, date(2026, 1, 2))]
+
+    monkeypatch.setattr(main_module, "fetch_stock_daily_prices", fake_fetch_stock)
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+
+    main_module.run_backfill(build_backfill_arguments(indicator="stock:000660"))
+
+    # 환율은 호출되지 않고 지정 종목만 수집된다.
+    assert call_order == ["stock:000660"]
+
+
+def test_backfill_indicator_filter_exchange_only(patched_runtime, monkeypatch):
+    call_order: list[str] = []
+
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: pytest.fail("환율 전용 필터에서는 주식 목록을 조회하지 않아야 한다"),
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: call_order.append("exchange") or [build_exchange_rate_row(date(2026, 1, 2))],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_stock_daily_prices",
+        lambda *args, **kwargs: call_order.append("stock") or [],
+    )
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+
+    main_module.run_backfill(build_backfill_arguments(indicator="exchange_rate:USD_KRW"))
+
+    assert call_order == ["exchange"]
+
+
+def test_backfill_unknown_stock_indicator_exits_with_code_1(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: [build_stock_indicator("id-1", "005930", "삼성전자")],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_stock_daily_prices",
+        lambda *args, **kwargs: pytest.fail("매칭 실패 시 수집을 시도하면 안 된다"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_backfill(build_backfill_arguments(indicator="stock:999999"))
+
+    assert exit_info.value.code == 1
+
+
+def test_backfill_dry_run_skips_upsert(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: [build_stock_indicator("id-1", "005930", "삼성전자")],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: [build_exchange_rate_row(date(2026, 1, 2))],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_stock_daily_prices",
+        lambda *args, **kwargs: [build_stock_price_row("id-1", date(2026, 1, 2))],
+    )
+    monkeypatch.setattr(
+        main_module, "upsert_exchange_rates",
+        lambda client, rows: pytest.fail("dry-run에서는 upsert를 호출하면 안 된다"),
+    )
+    monkeypatch.setattr(
+        main_module, "upsert_daily_prices",
+        lambda client, rows: pytest.fail("dry-run에서는 upsert를 호출하면 안 된다"),
+    )
+
+    main_module.run_backfill(build_backfill_arguments(dry_run=True))
+
+
+def test_daily_requests_from_latest_date_plus_one(patched_runtime, monkeypatch):
+    exchange_ranges: list[tuple[date, date]] = []
+    stock_ranges: list[tuple[date, date]] = []
+
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: [build_stock_indicator("id-1", "005930", "삼성전자")],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: date(2026, 7, 10)
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 7, 11),
+    )
+
+    def fake_fetch_exchange(kis_client, start_date, end_date):
+        exchange_ranges.append((start_date, end_date))
+        return [build_exchange_rate_row(date(2026, 7, 13))]
+
+    def fake_fetch_stock(kis_client, indicator_id, stock_code, start_date, end_date):
+        stock_ranges.append((start_date, end_date))
+        return [build_stock_price_row(indicator_id, date(2026, 7, 13))]
+
+    monkeypatch.setattr(main_module, "fetch_usd_krw_exchange_rates", fake_fetch_exchange)
+    monkeypatch.setattr(main_module, "fetch_stock_daily_prices", fake_fetch_stock)
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    main_module.run_daily(build_daily_arguments())
+
+    assert exchange_ranges == [(date(2026, 7, 11), FIXED_TODAY)]
+    assert stock_ranges == [(date(2026, 7, 12), FIXED_TODAY)]
+
+
+def test_daily_skips_empty_db_indicator(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: None
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: pytest.fail("빈 DB 지표는 수집을 건너뛰어야 한다"),
+    )
+
+    main_module.run_daily(build_daily_arguments())
+
+
+def test_daily_skips_when_already_up_to_date(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    # 최신일이 오늘이면 시작일(오늘+1) > 오늘 이므로 수집하지 않는다.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: pytest.fail("이미 최신이면 수집 함수를 호출하면 안 된다"),
+    )
+
+    main_module.run_daily(build_daily_arguments())
+
+
+def test_daily_dry_run_reads_latest_but_skips_upsert(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: date(2026, 7, 11)
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: [build_exchange_rate_row(date(2026, 7, 13))],
+    )
+    monkeypatch.setattr(
+        main_module, "upsert_exchange_rates",
+        lambda client, rows: pytest.fail("dry-run에서는 upsert를 호출하면 안 된다"),
+    )
+
+    main_module.run_daily(build_daily_arguments(dry_run=True))
+
+
+def test_one_indicator_failure_continues_others_and_exits_1(patched_runtime, monkeypatch):
+    attempted_stock_codes: list[str] = []
+
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: [
+            build_stock_indicator("id-1", "005930", "삼성전자"),
+            build_stock_indicator("id-2", "000660", "SK하이닉스"),
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: [build_exchange_rate_row(date(2026, 1, 2))],
+    )
+
+    def fake_fetch_stock(kis_client, indicator_id, stock_code, start_date, end_date):
+        attempted_stock_codes.append(stock_code)
+        if stock_code == "005930":
+            raise RuntimeError("일시적 시세 조회 실패")
+        return [build_stock_price_row(indicator_id, date(2026, 1, 2))]
+
+    monkeypatch.setattr(main_module, "fetch_stock_daily_prices", fake_fetch_stock)
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_backfill(build_backfill_arguments())
+
+    # 첫 종목이 실패해도 두 번째 종목까지 시도되어야 한다.
+    assert attempted_stock_codes == ["005930", "000660"]
+    assert exit_info.value.code == 1
+
+
+def test_invalid_from_date_exits_with_code_1(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: pytest.fail("날짜 파싱 실패 시 그 뒤 단계로 진행하면 안 된다"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_backfill(build_backfill_arguments(start_date="2026-13-40"))
+
+    assert exit_info.value.code == 1
