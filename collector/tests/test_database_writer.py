@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -86,6 +88,48 @@ def test_upsert_daily_prices_uses_table_conflict_and_serialized_dates() -> None:
     assert call.on_conflict == "indicator_id,price_date"
     assert call.rows[0]["price_date"] == "2026-07-10"
     assert isinstance(call.rows[0]["price_date"], str)
+
+
+def test_upsert_daily_prices_serializes_decimal_to_json_safe_string() -> None:
+    # 실제 수집 행은 close_price 등이 Decimal이다. upsert 페이로드는 JSON 직렬화
+    # 가능해야 하며(supabase-py가 JSON으로 전송), Decimal은 정밀도 유지를 위해 문자열이어야 한다.
+    client = FakeClient()
+    price_rows = [
+        {
+            "indicator_id": "stock:005930",
+            "price_date": date(2026, 7, 10),
+            "close_price": Decimal("80000.0000"),
+            "open_price": Decimal("79500.5000"),
+            "high_price": None,
+            "trade_volume": 1234,
+        }
+    ]
+
+    upsert_daily_prices(client, price_rows)
+
+    serialized_row = client.upsert_calls[0].rows[0]
+    assert serialized_row["close_price"] == "80000.0000"
+    assert serialized_row["open_price"] == "79500.5000"
+    assert serialized_row["high_price"] is None
+    # 전체 페이로드가 JSON 직렬화되어야 실제 전송이 성공한다.
+    json.dumps(serialized_row)
+
+
+def test_upsert_exchange_rates_serializes_decimal_rate() -> None:
+    client = FakeClient()
+    rate_rows = [
+        {
+            "currency_pair": "USD_KRW",
+            "rate_date": date(2026, 7, 10),
+            "close_rate": Decimal("1495.9000"),
+        }
+    ]
+
+    upsert_exchange_rates(client, rate_rows)
+
+    serialized_row = client.upsert_calls[0].rows[0]
+    assert serialized_row["close_rate"] == "1495.9000"
+    json.dumps(serialized_row)
 
 
 def test_upsert_exchange_rates_uses_table_and_conflict() -> None:

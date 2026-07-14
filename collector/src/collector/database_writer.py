@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
 from supabase import Client, create_client
 
@@ -57,16 +58,21 @@ def fetch_latest_exchange_rate_date(
     return date.fromisoformat(rows[0]["rate_date"])
 
 
-def _serialize_date_values(rows: list[dict]) -> list[dict]:
-    # date 객체는 JSON 직렬화가 안 되므로 ISO 문자열로 변환한다.
-    serialized_rows: list[dict] = []
-    for row in rows:
-        serialized_row = {
-            key: (value.isoformat() if isinstance(value, date) else value)
-            for key, value in row.items()
-        }
-        serialized_rows.append(serialized_row)
-    return serialized_rows
+def _serialize_row_value(value: object) -> object:
+    # date/Decimal은 JSON 직렬화가 안 되므로 변환한다. Decimal은 정밀도 유지를 위해
+    # float이 아니라 문자열로 보낸다(PostgreSQL numeric 컬럼이 문자열을 정확히 받는다).
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+
+def _serialize_row_values(rows: list[dict]) -> list[dict]:
+    return [
+        {key: _serialize_row_value(value) for key, value in row.items()}
+        for row in rows
+    ]
 
 
 def _upsert_in_batches(
@@ -87,7 +93,7 @@ def _upsert_in_batches(
 def upsert_daily_prices(client: Client, price_rows: list[dict]) -> int:
     if not price_rows:
         return 0
-    serialized_rows = _serialize_date_values(price_rows)
+    serialized_rows = _serialize_row_values(price_rows)
     return _upsert_in_batches(
         client, "daily_prices", serialized_rows, on_conflict="indicator_id,price_date"
     )
@@ -96,7 +102,7 @@ def upsert_daily_prices(client: Client, price_rows: list[dict]) -> int:
 def upsert_exchange_rates(client: Client, rate_rows: list[dict]) -> int:
     if not rate_rows:
         return 0
-    serialized_rows = _serialize_date_values(rate_rows)
+    serialized_rows = _serialize_row_values(rate_rows)
     return _upsert_in_batches(
         client, "exchange_rates", serialized_rows, on_conflict="currency_pair,rate_date"
     )
