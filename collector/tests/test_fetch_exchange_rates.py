@@ -16,7 +16,11 @@ from collector.fetch_exchange_rates import (
     USD_KRW_INPUT_ISCD,
     fetch_usd_krw_exchange_rates,
 )
-from collector.kis_client import KisClient, KisQuotationError
+from collector.kis_client import (
+    INTER_REQUEST_WAIT_SECONDS,
+    KisClient,
+    KisQuotationError,
+)
 
 EXCHANGE_RATE_DAILY_CHART_URL = (
     f"{KIS_PRODUCTION_BASE_URL}{EXCHANGE_RATE_DAILY_CHART_PATH}"
@@ -172,4 +176,4 @@ def test_sleep_function_is_invoked_for_rate_limit_spacing() -> None:
         end_date=date(2026, 1, 10),
     )
 
-    assert recorded_wait_seconds == [0.5]
+    assert recorded_wait_seconds == [INTER_REQUEST_WAIT_SECONDS]

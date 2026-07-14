@@ -13,7 +13,11 @@ from collector.fetch_stock_prices import (
     STOCK_DAILY_CHART_TR_ID,
     fetch_stock_daily_prices,
 )
-from collector.kis_client import KisClient, KisQuotationError
+from collector.kis_client import (
+    INTER_REQUEST_WAIT_SECONDS,
+    KisClient,
+    KisQuotationError,
+)
 
 STOCK_DAILY_CHART_URL = f"{KIS_PRODUCTION_BASE_URL}{STOCK_DAILY_CHART_PATH}"
 
@@ -211,8 +215,8 @@ def test_sleep_function_is_invoked_for_rate_limit_spacing() -> None:
         end_date=date(2026, 1, 10),
     )
 
-    # 단일 구간 = 1회 호출 = 호출 전 0.5초 대기 1회.
-    assert recorded_wait_seconds == [0.5]
+    # 단일 구간 = 1회 호출 = 호출 전 대기 1회.
+    assert recorded_wait_seconds == [INTER_REQUEST_WAIT_SECONDS]
 
 
 @respx.mock
