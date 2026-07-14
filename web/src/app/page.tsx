@@ -25,6 +25,10 @@ import {
 // ISR: 1시간마다 재생성.
 export const revalidate = 3600;
 
+// Vercel 배포 시 인천(서울) 리전을 선호한다. Supabase 서울 리전과 가까워 서버-DB 왕복이 짧아진다.
+// (Hobby 플랜에서는 무시될 수 있으나 무해하다.)
+export const preferredRegion = "icn1";
+
 const RATE_FORMATTER = new Intl.NumberFormat("ko-KR", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,

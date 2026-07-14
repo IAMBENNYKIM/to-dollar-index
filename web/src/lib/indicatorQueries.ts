@@ -29,17 +29,20 @@ export type PageFetcher<Row> = (
   to: number,
 ) => PromiseLike<PageResult<Row>>;
 
+/** 총 행수를 조회하는 함수. supabase 의 head+count 쿼리 결과 형태와 호환된다. */
+export type RowCounter = () => PromiseLike<{
+  count: number | null;
+  error: { message: string } | null;
+}>;
+
 /**
- * 페이지네이션 루프. fetchPage 를 반복 호출하여 모든 행을 수집한다.
+ * 순차 페이지네이션 루프(폴백 경로). fetchPage 를 반복 호출하여 모든 행을 수집한다.
  *
  * 종료 조건:
  * - 반환된 행 수가 PAGE_SIZE 미만이면 마지막 페이지이므로 중단한다.
  * - 반환된 행이 없으면(빈 배열/null) 중단한다.
- *
- * @param fetchPage inclusive 범위 [from, to] 의 페이지를 조회하는 함수
- * @param context  에러 메시지에 포함할 조회 대상 설명
  */
-export async function fetchAllRows<Row>(
+async function fetchAllRowsSequential<Row>(
   fetchPage: PageFetcher<Row>,
   context: string,
 ): Promise<Row[]> {
@@ -68,6 +71,75 @@ export async function fetchAllRows<Row>(
   }
 
   return allRows;
+}
+
+/**
+ * count 기반 병렬 조회. 총 행수를 알고 있으므로 필요한 페이지 범위를 한꺼번에
+ * Promise.all 로 조회한다. 순차 왕복(N회)이 1회 왕복 시간으로 단축된다.
+ * Promise.all 은 입력 순서를 보존하므로 행 순서(정렬)도 유지된다.
+ */
+async function fetchAllRowsByCount<Row>(
+  fetchPage: PageFetcher<Row>,
+  context: string,
+  totalCount: number,
+): Promise<Row[]> {
+  if (totalCount <= 0) {
+    return [];
+  }
+
+  const pageCount = Math.ceil(totalCount / PAGE_SIZE);
+  const pagePromises: Array<PromiseLike<PageResult<Row>>> = [];
+
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    const from = pageIndex * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+    pagePromises.push(fetchPage(from, to));
+  }
+
+  const pages = await Promise.all(pagePromises);
+
+  const allRows: Row[] = [];
+  for (const { data, error } of pages) {
+    if (error) {
+      throw new Error(`${context} 조회 중 오류가 발생했습니다: ${error.message}`);
+    }
+    if (data) {
+      allRows.push(...data);
+    }
+  }
+
+  return allRows;
+}
+
+/**
+ * 페이지네이션 헬퍼. 모든 행을 수집한다.
+ *
+ * countRows 가 주어지고 count 가 non-null 이면 필요한 페이지 수를 계산해 병렬 조회한다.
+ * count 가 null(추정 불가)이거나 countRows 가 없으면 순차 루프로 안전하게 폴백한다.
+ *
+ * @param fetchPage inclusive 범위 [from, to] 의 페이지를 조회하는 함수
+ * @param context   에러 메시지에 포함할 조회 대상 설명
+ * @param countRows 총 행수를 구하는 함수(선택). head+count 쿼리 사용을 권장.
+ */
+export async function fetchAllRows<Row>(
+  fetchPage: PageFetcher<Row>,
+  context: string,
+  countRows?: RowCounter,
+): Promise<Row[]> {
+  if (countRows) {
+    const { count, error } = await countRows();
+
+    if (error) {
+      throw new Error(`${context} 조회 중 오류가 발생했습니다: ${error.message}`);
+    }
+
+    if (count !== null) {
+      return fetchAllRowsByCount(fetchPage, context, count);
+    }
+    // count 가 null 이면 순차 폴백으로 진행한다.
+  }
+
+  return fetchAllRowsSequential(fetchPage, context);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +269,21 @@ export async function fetchExchangeRateHistory(
     return query.range(from, to);
   };
 
-  const rows = await fetchAllRows(fetchPage, "환율 시계열");
+  // 총 행수를 먼저 구해 페이지들을 병렬 조회한다(head+count → 본문 전송 없음).
+  const countRows: RowCounter = () => {
+    let query = supabase
+      .from("exchange_rates")
+      .select("rate_date", { count: "exact", head: true })
+      .eq("currency_pair", "USD_KRW");
+
+    if (sinceDate) {
+      query = query.gte("rate_date", sinceDate);
+    }
+
+    return query;
+  };
+
+  const rows = await fetchAllRows(fetchPage, "환율 시계열", countRows);
   return rows.map(mapExchangeRateRow);
 }
 
@@ -218,6 +304,17 @@ export async function fetchDailyPricesWithUsd(
       .order("price_date", { ascending: true })
       .range(from, to);
 
-  const rows = await fetchAllRows(fetchPage, `일봉 시계열(${indicatorId})`);
+  // 총 행수를 먼저 구해 페이지들을 병렬 조회한다(head+count → 본문 전송 없음).
+  const countRows: RowCounter = () =>
+    supabase
+      .from("daily_prices_with_usd")
+      .select("price_date", { count: "exact", head: true })
+      .eq("indicator_id", indicatorId);
+
+  const rows = await fetchAllRows(
+    fetchPage,
+    `일봉 시계열(${indicatorId})`,
+    countRows,
+  );
   return rows.map(mapDualCurrencyRow);
 }
