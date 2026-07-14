@@ -54,6 +54,25 @@ def test_load_config_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.supabase_service_role_key == "test-service-role-key"
 
 
+def test_load_config_without_kosis_key_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_valid_environment(monkeypatch)
+    monkeypatch.delenv("KOSIS_KEY", raising=False)
+
+    config = load_config()
+
+    # KOSIS 키가 없어도 로드에 성공하고 kosis_api_key는 None이어야 한다.
+    assert config.kosis_api_key is None
+
+
+def test_load_config_reads_kosis_key_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_valid_environment(monkeypatch)
+    monkeypatch.setenv("KOSIS_KEY", "test-kosis-key")
+
+    config = load_config()
+
+    assert config.kosis_api_key == "test-kosis-key"
+
+
 def test_load_config_missing_variables_reports_all(monkeypatch: pytest.MonkeyPatch) -> None:
     for environment_variable_name in REQUIRED_ENVIRONMENT_VARIABLE_NAMES:
         monkeypatch.delenv(environment_variable_name, raising=False)

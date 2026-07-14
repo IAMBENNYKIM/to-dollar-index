@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from collector.config import load_config
 from collector.database_writer import (
     create_supabase_client,
+    fetch_active_real_estate_indicators,
     fetch_active_stock_indicators,
     fetch_latest_exchange_rate_date,
     fetch_latest_price_date,
@@ -15,16 +16,24 @@ from collector.database_writer import (
     upsert_exchange_rates,
 )
 from collector.fetch_exchange_rates import fetch_usd_krw_exchange_rates
+from collector.fetch_real_estate import fetch_real_estate_prices
 from collector.fetch_stock_prices import fetch_stock_daily_prices
 from collector.kis_auth import get_access_token
 from collector.kis_client import KisClient
 
-# --indicator 식별자 규약. 환율은 고정 키, 주식은 'stock:종목코드'.
+# --indicator 식별자 규약. 환율은 고정 키, 주식은 'stock:종목코드', 부동산은 'real_estate:소스코드'.
 EXCHANGE_RATE_INDICATOR_KEY = "exchange_rate:USD_KRW"
 STOCK_INDICATOR_PREFIX = "stock:"
+REAL_ESTATE_INDICATOR_PREFIX = "real_estate:"
 
 TASK_KIND_EXCHANGE_RATE = "exchange_rate"
 TASK_KIND_STOCK = "stock"
+TASK_KIND_REAL_ESTATE = "real_estate"
+
+# 부동산(월 데이터) 수집 개월 수. backfill은 전량(244행 커버), daily는 최근 몇 개월을 재수집해
+# 통계 개정(revision)을 멱등 upsert로 반영한다.
+REAL_ESTATE_BACKFILL_PERIODS = 400
+REAL_ESTATE_DAILY_PERIODS = 4
 
 
 @dataclass(frozen=True)
@@ -73,17 +82,35 @@ def _build_stock_task(indicator: dict) -> CollectionTask:
     )
 
 
-def build_collection_tasks(
-    supabase_client, indicator_filter: str | None
-) -> list[CollectionTask] | None:
-    """수집할 지표 작업 목록을 만든다. 환율을 항상 주식보다 앞에 둔다.
+def _build_real_estate_task(indicator: dict) -> CollectionTask:
+    # 지표 id가 곧 --indicator 필터 값이자 태스크 키다.
+    # 주식과 달리 부동산은 id 접미사(seoul-small)와 source_code(DT_KAB_11672_S19)가 다르다.
+    indicator_id = indicator["id"]
+    return CollectionTask(
+        key=indicator_id,
+        kind=TASK_KIND_REAL_ESTATE,
+        display_name=indicator.get("display_name"),
+        indicator_id=indicator_id,
+    )
 
-    지표 식별자를 해석할 수 없거나 매칭되는 주식이 없으면 안내를 출력하고 None을 반환한다.
+
+def build_collection_tasks(
+    supabase_client, indicator_filter: str | None, kosis_api_key: str | None
+) -> list[CollectionTask] | None:
+    """수집할 지표 작업 목록을 만든다. 환율 → 주식 → 부동산 순서를 유지한다.
+
+    부동산 태스크는 KOSIS 키가 있을 때만 추가한다(키가 없으면 안내 후 건너뜀).
+    지표 식별자를 해석할 수 없거나 매칭되는 지표가 없으면 안내를 출력하고 None을 반환한다.
     """
     if indicator_filter is None:
         collection_tasks = [_build_exchange_rate_task()]
         for indicator in fetch_active_stock_indicators(supabase_client):
             collection_tasks.append(_build_stock_task(indicator))
+        if kosis_api_key:
+            for indicator in fetch_active_real_estate_indicators(supabase_client):
+                collection_tasks.append(_build_real_estate_task(indicator))
+        else:
+            print("KOSIS_KEY가 설정되지 않아 부동산 지표 수집을 건너뜁니다.")
         return collection_tasks
 
     if indicator_filter == EXCHANGE_RATE_INDICATOR_KEY:
@@ -101,19 +128,48 @@ def build_collection_tasks(
         )
         return None
 
+    if indicator_filter.startswith(REAL_ESTATE_INDICATOR_PREFIX):
+        if not kosis_api_key:
+            print(
+                f"KOSIS_KEY가 설정되지 않아 부동산 지표를 수집할 수 없습니다: '{indicator_filter}'.",
+                file=sys.stderr,
+            )
+            return None
+        # 부동산은 id 접미사가 source_code와 다르므로 전체 id로 매칭한다.
+        for indicator in fetch_active_real_estate_indicators(supabase_client):
+            if indicator["id"] == indicator_filter:
+                return [_build_real_estate_task(indicator)]
+        print(
+            f"지표를 찾을 수 없습니다: '{indicator_filter}' "
+            f"(활성 부동산 지표 목록에 해당 id가 없습니다).",
+            file=sys.stderr,
+        )
+        return None
+
     print(
         f"알 수 없는 --indicator 형식입니다: '{indicator_filter}'. "
-        f"'{STOCK_INDICATOR_PREFIX}종목코드' 또는 '{EXCHANGE_RATE_INDICATOR_KEY}' 형식을 사용하세요.",
+        f"'{STOCK_INDICATOR_PREFIX}종목코드', '{REAL_ESTATE_INDICATOR_PREFIX}소스코드' 또는 "
+        f"'{EXCHANGE_RATE_INDICATOR_KEY}' 형식을 사용하세요.",
         file=sys.stderr,
     )
     return None
 
 
 def _collect_task_rows(
-    task: CollectionTask, kis_client: KisClient, start_date: date, end_date: date
+    task: CollectionTask,
+    kis_client: KisClient,
+    config,
+    start_date: date,
+    end_date: date,
+    real_estate_periods_count: int,
 ) -> list[dict]:
     if task.kind == TASK_KIND_EXCHANGE_RATE:
         return fetch_usd_krw_exchange_rates(kis_client, start_date, end_date)
+    if task.kind == TASK_KIND_REAL_ESTATE:
+        # 부동산은 월 데이터라 start/end 구간이 아니라 최근 개월 수(newEstPrdCnt)로 조회한다.
+        return fetch_real_estate_prices(
+            config.kosis_api_key, task.indicator_id, real_estate_periods_count
+        )
     return fetch_stock_daily_prices(
         kis_client, task.indicator_id, task.stock_code, start_date, end_date
     )
@@ -122,7 +178,20 @@ def _collect_task_rows(
 def _upsert_task_rows(task: CollectionTask, supabase_client, rows: list[dict]) -> int:
     if task.kind == TASK_KIND_EXCHANGE_RATE:
         return upsert_exchange_rates(supabase_client, rows)
+    # 주식·부동산 모두 daily_prices 테이블을 공유한다.
     return upsert_daily_prices(supabase_client, rows)
+
+
+def _summary_range(
+    task: CollectionTask,
+    fallback_start_date: date,
+    fallback_end_date: date,
+    rows: list[dict],
+) -> tuple[date, date]:
+    # 부동산은 조회 구간이 아니라 실제 수집된 월(price_date) 범위를 요약에 표기한다.
+    if task.kind == TASK_KIND_REAL_ESTATE and rows:
+        return rows[0]["price_date"], rows[-1]["price_date"]
+    return fallback_start_date, fallback_end_date
 
 
 def _fetch_latest_date_for_task(task: CollectionTask, supabase_client) -> date | None:
@@ -163,12 +232,12 @@ def _print_task_summary(
         print("  [dry-run] 쓰기 생략")
 
 
-def _create_runtime_clients() -> tuple[KisClient, object]:
+def _create_runtime_clients() -> tuple[KisClient, object, object]:
     config = load_config()
     access_token = get_access_token(config)
     kis_client = KisClient(config, access_token)
     supabase_client = create_supabase_client(config)
-    return kis_client, supabase_client
+    return kis_client, supabase_client, config
 
 
 def run_backfill(arguments: argparse.Namespace) -> None:
@@ -181,19 +250,26 @@ def run_backfill(arguments: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    kis_client, supabase_client = _create_runtime_clients()
+    kis_client, supabase_client, config = _create_runtime_clients()
 
-    collection_tasks = build_collection_tasks(supabase_client, arguments.indicator)
+    collection_tasks = build_collection_tasks(
+        supabase_client, arguments.indicator, config.kosis_api_key
+    )
     if collection_tasks is None:
         sys.exit(1)
 
     had_failure = False
     for task in collection_tasks:
         try:
-            rows = _collect_task_rows(task, kis_client, start_date, end_date)
+            # 부동산은 start/end를 무시하고 전량(REAL_ESTATE_BACKFILL_PERIODS)을 수집한다.
+            rows = _collect_task_rows(
+                task, kis_client, config, start_date, end_date,
+                REAL_ESTATE_BACKFILL_PERIODS,
+            )
             if not arguments.dry_run:
                 _upsert_task_rows(task, supabase_client, rows)
-            _print_task_summary(task, start_date, end_date, rows, arguments.dry_run)
+            summary_start, summary_end = _summary_range(task, start_date, end_date, rows)
+            _print_task_summary(task, summary_start, summary_end, rows, arguments.dry_run)
         except Exception as collection_error:
             had_failure = True
             print(f"[{task.key}] 수집 실패: {collection_error}", file=sys.stderr)
@@ -205,15 +281,27 @@ def run_backfill(arguments: argparse.Namespace) -> None:
 def run_daily(arguments: argparse.Namespace) -> None:
     end_date = get_today_date()
 
-    kis_client, supabase_client = _create_runtime_clients()
+    kis_client, supabase_client, config = _create_runtime_clients()
 
-    collection_tasks = build_collection_tasks(supabase_client, None)
+    collection_tasks = build_collection_tasks(supabase_client, None, config.kosis_api_key)
     if collection_tasks is None:
         sys.exit(1)
 
     had_failure = False
     for task in collection_tasks:
         try:
+            if task.kind == TASK_KIND_REAL_ESTATE:
+                # 부동산은 증분 로직을 타지 않고 최근 몇 개월을 재수집해 개정분을 멱등 upsert한다.
+                rows = _collect_task_rows(
+                    task, kis_client, config, end_date, end_date,
+                    REAL_ESTATE_DAILY_PERIODS,
+                )
+                if not arguments.dry_run:
+                    _upsert_task_rows(task, supabase_client, rows)
+                summary_start, summary_end = _summary_range(task, end_date, end_date, rows)
+                _print_task_summary(task, summary_start, summary_end, rows, arguments.dry_run)
+                continue
+
             latest_date = _fetch_latest_date_for_task(task, supabase_client)
             if latest_date is None:
                 print(
@@ -226,7 +314,10 @@ def run_daily(arguments: argparse.Namespace) -> None:
                 print(f"[{task.key}] 이미 최신입니다(최신일 {latest_date}). 건너뜁니다.")
                 continue
 
-            rows = _collect_task_rows(task, kis_client, start_date, end_date)
+            rows = _collect_task_rows(
+                task, kis_client, config, start_date, end_date,
+                REAL_ESTATE_DAILY_PERIODS,
+            )
             if not arguments.dry_run:
                 _upsert_task_rows(task, supabase_client, rows)
             _print_task_summary(task, start_date, end_date, rows, arguments.dry_run)

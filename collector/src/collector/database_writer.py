@@ -26,6 +26,17 @@ def fetch_active_stock_indicators(client: Client) -> list[dict]:
     return list(response.data)
 
 
+def fetch_active_real_estate_indicators(client: Client) -> list[dict]:
+    response = (
+        client.table("indicators")
+        .select("id, source_code, display_name")
+        .eq("indicator_type", "real_estate")
+        .eq("is_active", True)
+        .execute()
+    )
+    return list(response.data)
+
+
 def fetch_latest_price_date(client: Client, indicator_id: str) -> date | None:
     response = (
         client.table("daily_prices")

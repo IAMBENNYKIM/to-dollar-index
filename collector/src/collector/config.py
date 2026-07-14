@@ -32,6 +32,9 @@ class CollectorConfig:
     kis_base_url: str
     supabase_url: str
     supabase_service_role_key: str
+    # KOSIS(한국부동산원) 오픈API 키. 부동산 지표 수집에만 쓰이며, 없어도 주식/환율 수집은 동작해야
+    # 하므로 선택값(None 허용)이다.
+    kosis_api_key: str | None = None
 
 
 def _load_dotenv_once() -> None:
@@ -135,10 +138,18 @@ def load_config() -> CollectorConfig:
         )
 
     kis_base_url = resolve_kis_base_url()
+    # KOSIS 키는 선택적으로만 읽는다. 없으면 None으로 두고 부동산 수집만 건너뛴다.
+    raw_kosis_api_key = os.environ.get("KOSIS_KEY")
+    kosis_api_key = (
+        raw_kosis_api_key.strip()
+        if raw_kosis_api_key is not None and raw_kosis_api_key.strip()
+        else None
+    )
     return CollectorConfig(
         kis_app_key=resolved_values["kis_app_key"],
         kis_app_secret=resolved_values["kis_app_secret"],
         kis_base_url=kis_base_url,
         supabase_url=resolved_values["supabase_url"],
         supabase_service_role_key=resolved_values["supabase_service_role_key"],
+        kosis_api_key=kosis_api_key,
     )

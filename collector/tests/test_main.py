@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,11 @@ FIXED_TODAY = date(2026, 7, 13)
 
 class FakeSupabaseClient:
     """수집 오케스트레이션 테스트용 placeholder. DB 접근 함수는 전부 monkeypatch로 대체된다."""
+
+
+def build_fake_config(kosis_api_key: str | None = None) -> SimpleNamespace:
+    # load_config 대체. 부동산 배선 분기에서 config.kosis_api_key만 참조하므로 그 필드만 채운다.
+    return SimpleNamespace(kosis_api_key=kosis_api_key)
 
 
 def build_backfill_arguments(
@@ -65,7 +71,7 @@ def patched_runtime(monkeypatch):
         "stock_upsert_calls": [],
     }
 
-    monkeypatch.setattr(main_module, "load_config", lambda: object())
+    monkeypatch.setattr(main_module, "load_config", lambda: build_fake_config())
     monkeypatch.setattr(main_module, "get_access_token", lambda config: "test-token")
     monkeypatch.setattr(
         main_module, "KisClient", lambda config, access_token: object()
@@ -324,6 +330,167 @@ def test_one_indicator_failure_continues_others_and_exits_1(patched_runtime, mon
     # 첫 종목이 실패해도 두 번째 종목까지 시도되어야 한다.
     assert attempted_stock_codes == ["005930", "000660"]
     assert exit_info.value.code == 1
+
+
+def build_real_estate_indicator(
+    indicator_id: str, source_code: str, display_name: str
+) -> dict:
+    return {
+        "id": indicator_id,
+        "source_code": source_code,
+        "display_name": display_name,
+    }
+
+
+def build_real_estate_price_row(indicator_id: str, price_date: date) -> dict:
+    return {
+        "indicator_id": indicator_id,
+        "price_date": price_date,
+        "close_price": Decimal("273635"),
+    }
+
+
+def test_backfill_without_kosis_key_skips_real_estate(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key=None)
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: pytest.fail("KOSIS 키가 없으면 부동산 지표 목록을 조회하면 안 된다"),
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: [build_exchange_rate_row(date(2026, 1, 2))],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_real_estate_prices",
+        lambda *args, **kwargs: pytest.fail("KOSIS 키가 없으면 부동산을 수집하면 안 된다"),
+    )
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+
+    main_module.run_backfill(build_backfill_arguments())
+
+
+def test_backfill_with_kosis_key_appends_real_estate_after_stocks(
+    patched_runtime, monkeypatch
+):
+    call_order: list[str] = []
+    real_estate_periods: list[int] = []
+
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: [build_stock_indicator("id-1", "005930", "삼성전자")],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [build_real_estate_indicator("re-1", "seoul-small", "서울 소형")],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: call_order.append("exchange") or [build_exchange_rate_row(date(2026, 1, 2))],
+    )
+
+    def fake_fetch_stock(kis_client, indicator_id, stock_code, start_date, end_date):
+        call_order.append(f"stock:{stock_code}")
+        return [build_stock_price_row(indicator_id, date(2026, 1, 2))]
+
+    def fake_fetch_real_estate(kosis_api_key, indicator_id, periods_count):
+        call_order.append(f"real_estate:{indicator_id}")
+        real_estate_periods.append(periods_count)
+        assert kosis_api_key == "kosis-key"
+        return [build_real_estate_price_row(indicator_id, date(2006, 1, 1))]
+
+    monkeypatch.setattr(main_module, "fetch_stock_daily_prices", fake_fetch_stock)
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", fake_fetch_real_estate)
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    main_module.run_backfill(build_backfill_arguments())
+
+    # 환율 → 주식 → 부동산 순서. 부동산은 backfill 전량 개월 수로 조회한다.
+    assert call_order == ["exchange", "stock:005930", "real_estate:re-1"]
+    assert real_estate_periods == [main_module.REAL_ESTATE_BACKFILL_PERIODS]
+
+
+def test_backfill_real_estate_filter_matches_indicator(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators",
+        lambda client: pytest.fail("부동산 필터에서는 주식 목록을 조회하지 않아야 한다"),
+    )
+    # 실제 시드처럼 id 접미사(seoul-small)와 source_code(DT_KAB_11672_S19)가 다른 경우.
+    # --indicator 는 전체 id 로 매칭되어야 한다.
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+
+    collected_indicator_ids: list[str] = []
+
+    def fake_fetch_real_estate(kosis_api_key, indicator_id, periods_count):
+        collected_indicator_ids.append(indicator_id)
+        return [build_real_estate_price_row(indicator_id, date(2006, 1, 1))]
+
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", fake_fetch_real_estate)
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    main_module.run_backfill(
+        build_backfill_arguments(indicator="real_estate:seoul-small")
+    )
+
+    assert collected_indicator_ids == ["real_estate:seoul-small"]
+
+
+def test_daily_real_estate_recollects_recent_periods(patched_runtime, monkeypatch):
+    real_estate_periods: list[int] = []
+
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [build_real_estate_indicator("re-1", "seoul-small", "서울 소형")],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: pytest.fail(
+            "부동산은 latest 증분 로직을 타지 않아야 한다"
+        ),
+    )
+
+    def fake_fetch_real_estate(kosis_api_key, indicator_id, periods_count):
+        real_estate_periods.append(periods_count)
+        return [build_real_estate_price_row(indicator_id, date(2026, 4, 1))]
+
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", fake_fetch_real_estate)
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: pytest.fail("환율은 이미 최신이라 수집하지 않아야 한다"),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    main_module.run_daily(build_daily_arguments())
+
+    # 부동산은 최신 여부와 무관하게 항상 최근 개월 수로 재수집한다.
+    assert real_estate_periods == [main_module.REAL_ESTATE_DAILY_PERIODS]
 
 
 def test_invalid_from_date_exits_with_code_1(patched_runtime, monkeypatch):
