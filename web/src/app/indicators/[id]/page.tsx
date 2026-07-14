@@ -17,6 +17,10 @@ import {
 // ISR: 1시간마다 재생성.
 export const revalidate = 3600;
 
+// Vercel 배포 시 인천(서울) 리전을 선호한다. Supabase 서울 리전과 가까워 서버-DB 왕복이 짧아진다.
+// (Hobby 플랜에서는 무시될 수 있으나 무해하다.)
+export const preferredRegion = "icn1";
+
 // Next 15 App Router 에서 동적 라우트의 params 는 Promise 이므로 await 해야 한다.
 interface IndicatorDetailPageProps {
   params: Promise<{ id: string }>;
@@ -84,7 +88,7 @@ export default async function IndicatorDetailPage({
               {loadFailed
                 ? "데이터를 불러오지 못했습니다. 잠시 후 다시 시도해주세요."
                 : points.length > 0
-                  ? "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
+                  ? "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
                   : "표시할 시계열 데이터가 없습니다."}
             </CardDescription>
           </CardHeader>

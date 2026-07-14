@@ -8,6 +8,13 @@ import {
   resolveZoomIndices,
   type RangeReturns,
 } from "@/lib/rangeReturns";
+import {
+  RANGE_PRESETS,
+  resolvePresetRange,
+  resolveRangeIndices,
+  type DateRangePreset,
+} from "@/lib/chartRange";
+import { Button } from "@/components/ui/button";
 import EChartsBase from "./EChartsBase";
 import RangeReturnPanel from "../RangeReturnPanel";
 
@@ -355,6 +362,85 @@ export default function DualCurrencyChart({
     };
   }, []);
 
+  // 정렬된 priceDate 배열. 프리셋/날짜 입력을 인덱스로 변환할 때 사용한다.
+  const dates = useMemo(() => points.map((point) => point.priceDate), [points]);
+  const firstDate = points.length > 0 ? points[0].priceDate : "";
+  const lastDate =
+    points.length > 0 ? points[points.length - 1].priceDate : "";
+
+  // 날짜 직접 입력값. points 가 바뀌면 전체 범위로 초기화한다.
+  const [startDateInput, setStartDateInput] = useState(firstDate);
+  const [endDateInput, setEndDateInput] = useState(lastDate);
+  useEffect(() => {
+    setStartDateInput(firstDate);
+    setEndDateInput(lastDate);
+  }, [firstDate, lastDate]);
+
+  // echarts 인스턴스 보관. onChartReady 콜백으로 주입되며 dispatchAction 에 사용한다.
+  const chartInstanceRef = useRef<{
+    dispatchAction?: (payload: unknown) => void;
+  } | null>(null);
+  const handleChartReady = useCallback((instance: unknown) => {
+    chartInstanceRef.current = instance as {
+      dispatchAction?: (payload: unknown) => void;
+    };
+  }, []);
+
+  /**
+   * 지정 인덱스 구간으로 차트를 줌하고 구간 수익률 패널을 갱신한다.
+   *
+   * - dispatchAction(dataZoom) 은 category 축이므로 startValue/endValue 에 배열 인덱스를
+   *   그대로 넘긴다. inside(0)/slider(1) 두 dataZoom 을 batch 로 함께 갱신해 슬라이더 위치도 반영.
+   * - dispatchAction 은 datazoom 이벤트를 트리거해 handleDataZoom → 패널 갱신으로 이어지지만,
+   *   트리거 여부와 무관하게 즉시 패널이 갱신되도록 여기서 직접 계산도 수행한다(이중 안전).
+   */
+  const applyRange = useCallback(
+    (startIndex: number, endIndex: number) => {
+      if (points.length === 0) {
+        return;
+      }
+      const maxIndex = points.length - 1;
+      const clampedStart = Math.max(0, Math.min(startIndex, maxIndex));
+      const clampedEnd = Math.max(0, Math.min(endIndex, maxIndex));
+
+      chartInstanceRef.current?.dispatchAction?.({
+        type: "dataZoom",
+        batch: [
+          { dataZoomIndex: 0, startValue: clampedStart, endValue: clampedEnd },
+          { dataZoomIndex: 1, startValue: clampedStart, endValue: clampedEnd },
+        ],
+      });
+
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+      setRangeReturns(
+        calculateRangeReturns(points, clampedStart, clampedEnd),
+      );
+    },
+    [points],
+  );
+
+  const handlePresetClick = useCallback(
+    (preset: DateRangePreset) => {
+      const range = resolvePresetRange(dates, preset);
+      if (range) {
+        applyRange(range.startIndex, range.endIndex);
+      }
+    },
+    [dates, applyRange],
+  );
+
+  const handleApplyDates = useCallback(() => {
+    if (!startDateInput || !endDateInput) {
+      return;
+    }
+    const range = resolveRangeIndices(dates, startDateInput, endDateInput);
+    if (range) {
+      applyRange(range.startIndex, range.endIndex);
+    }
+  }, [dates, startDateInput, endDateInput, applyRange]);
+
   const handleDataZoom = useCallback(
     (rawParams: unknown, instance: unknown) => {
       const percent =
@@ -405,9 +491,57 @@ export default function DualCurrencyChart({
 
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
+        {/* 기간 프리셋 버튼: 모바일에서 wrap */}
+        <div className="flex flex-wrap gap-1.5">
+          {RANGE_PRESETS.map((preset) => (
+            <Button
+              key={preset.key}
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => handlePresetClick(preset)}
+            >
+              {preset.label}
+            </Button>
+          ))}
+        </div>
+
+        {/* 날짜 직접 입력: 시작일/종료일 + 적용 */}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            시작일
+            <input
+              type="date"
+              value={startDateInput}
+              min={firstDate}
+              max={lastDate}
+              onChange={(event) => setStartDateInput(event.target.value)}
+              className="h-7 rounded-md border border-border bg-background px-2 text-[0.8rem] text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:border-input dark:bg-input/30 [color-scheme:light] dark:[color-scheme:dark]"
+            />
+          </label>
+          <span className="text-xs text-muted-foreground">~</span>
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            종료일
+            <input
+              type="date"
+              value={endDateInput}
+              min={firstDate}
+              max={lastDate}
+              onChange={(event) => setEndDateInput(event.target.value)}
+              className="h-7 rounded-md border border-border bg-background px-2 text-[0.8rem] text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:border-input dark:bg-input/30 [color-scheme:light] dark:[color-scheme:dark]"
+            />
+          </label>
+          <Button type="button" variant="outline" size="sm" onClick={handleApplyDates}>
+            적용
+          </Button>
+        </div>
+      </div>
+
       <EChartsBase
         option={option}
         onEvents={chartEvents}
+        onChartReady={handleChartReady}
         style={{ height: 420 }}
       />
       <RangeReturnPanel rangeReturns={rangeReturns} />
