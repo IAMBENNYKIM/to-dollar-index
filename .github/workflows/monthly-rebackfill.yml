@@ -39,6 +39,7 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_IS_MOCK: ${{ secrets.KIS_IS_MOCK }}
           KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
+          KOSIS_KEY: ${{ secrets.KOSIS_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python -m collector.main backfill --from ${{ github.event.inputs.from_date || '2015-01-01' }}
