@@ -318,3 +318,38 @@ export async function fetchDailyPricesWithUsd(
   );
   return rows.map(mapDualCurrencyRow);
 }
+
+/**
+ * 뷰 real_estate_prices_with_usd 에서 특정 부동산 지표의 이중 통화 월별 시계열을
+ * price_date 오름차순으로 전량 조회한다.
+ *
+ * 부동산은 월별 데이터이므로 해당 월의 평균 USD_KRW 환율로 환산한 뷰를 사용한다.
+ * 반환 컬럼·매핑(mapDualCurrencyRow)은 fetchDailyPricesWithUsd 와 동일하다.
+ */
+export async function fetchRealEstateMonthlyWithUsd(
+  indicatorId: string,
+): Promise<DualCurrencyPoint[]> {
+  const supabase = createSupabaseServerClient();
+
+  const fetchPage: PageFetcher<DualCurrencyRow> = (from, to) =>
+    supabase
+      .from("real_estate_prices_with_usd")
+      .select("price_date, close_price_krw, usd_krw_rate, close_price_usd")
+      .eq("indicator_id", indicatorId)
+      .order("price_date", { ascending: true })
+      .range(from, to);
+
+  // 총 행수를 먼저 구해 페이지들을 병렬 조회한다(head+count → 본문 전송 없음).
+  const countRows: RowCounter = () =>
+    supabase
+      .from("real_estate_prices_with_usd")
+      .select("price_date", { count: "exact", head: true })
+      .eq("indicator_id", indicatorId);
+
+  const rows = await fetchAllRows(
+    fetchPage,
+    `부동산 월별 시계열(${indicatorId})`,
+    countRows,
+  );
+  return rows.map(mapDualCurrencyRow);
+}

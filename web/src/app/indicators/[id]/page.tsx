@@ -4,6 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import {
   fetchDailyPricesWithUsd,
   fetchIndicatorById,
+  fetchRealEstateMonthlyWithUsd,
 } from "@/lib/indicatorQueries";
 import type { DualCurrencyPoint, Indicator } from "@/lib/types";
 import DualCurrencyChart from "@/components/charts/DualCurrencyChart";
@@ -47,10 +48,16 @@ export default async function IndicatorDetailPage({
     notFound();
   }
 
+  // 부동산은 월별 데이터라 해당 월 평균 환율로 환산하는 전용 뷰를 사용한다.
+  // 주식 등 일봉 지표는 기존 시점 환율 폴백 뷰(daily_prices_with_usd)를 그대로 쓴다.
+  const isRealEstate = indicator?.indicatorType === "real_estate";
+
   let points: DualCurrencyPoint[] = [];
   if (indicator) {
     try {
-      points = await fetchDailyPricesWithUsd(indicator.id);
+      points = isRealEstate
+        ? await fetchRealEstateMonthlyWithUsd(indicator.id)
+        : await fetchDailyPricesWithUsd(indicator.id);
     } catch {
       points = [];
     }
@@ -88,7 +95,9 @@ export default async function IndicatorDetailPage({
               {loadFailed
                 ? "데이터를 불러오지 못했습니다. 잠시 후 다시 시도해주세요."
                 : points.length > 0
-                  ? "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
+                  ? isRealEstate
+                    ? "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 한국부동산원 월별·59㎡ 환산·월평균 환율 기준. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
+                    : "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
                   : "표시할 시계열 데이터가 없습니다."}
             </CardDescription>
           </CardHeader>
