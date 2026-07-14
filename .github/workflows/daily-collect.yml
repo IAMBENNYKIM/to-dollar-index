@@ -1,6 +1,7 @@
 # 일일 종가 수집 배치
-# KIS_BASE_URL 실전 도메인 값: https://openapi.koreainvestment.com:9443
-# (config.load_config가 실전 도메인이 아니면 에러를 냄. Secret에 위 값을 설정할 것)
+# KIS 도메인은 KIS_IS_MOCK(true/false) 또는 KIS_BASE_URL 중 하나로 정한다.
+#   - 모의투자: Secret KIS_IS_MOCK=True (KIS_BASE_URL 불필요)
+#   - 실전투자: Secret KIS_BASE_URL=https://openapi.koreainvestment.com:9443
 name: daily-collect
 
 on:
@@ -30,6 +31,7 @@ jobs:
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_IS_MOCK: ${{ secrets.KIS_IS_MOCK }}
           KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

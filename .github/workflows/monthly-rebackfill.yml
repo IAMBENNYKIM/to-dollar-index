@@ -1,6 +1,6 @@
 # 월간 전체 재백필 (수정주가 basis drift 대응) + keepalive heartbeat
 # GitHub 60일 비활성 스케줄 정지 / Supabase 7일 무활동 정지 방지
-# KIS_BASE_URL 실전 도메인 값: https://openapi.koreainvestment.com:9443
+# KIS 도메인은 KIS_IS_MOCK(모의: True) 또는 KIS_BASE_URL(실전 도메인) 중 하나로 정한다.
 name: monthly-rebackfill
 
 on:
@@ -37,6 +37,7 @@ jobs:
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_IS_MOCK: ${{ secrets.KIS_IS_MOCK }}
           KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
