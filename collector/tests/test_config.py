@@ -73,6 +73,35 @@ def test_load_config_reads_kosis_key_when_present(monkeypatch: pytest.MonkeyPatc
     assert config.kosis_api_key == "test-kosis-key"
 
 
+def test_load_config_reads_ecos_key_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_valid_environment(monkeypatch)
+    monkeypatch.setenv("ECOS_API_KEY", "test-ecos-key")
+
+    config = load_config()
+
+    assert config.ecos_api_key == "test-ecos-key"
+
+
+def test_load_config_without_ecos_key_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_valid_environment(monkeypatch)
+    monkeypatch.delenv("ECOS_API_KEY", raising=False)
+
+    config = load_config()
+
+    # ECOS 키가 없어도 로드에 성공하고 ecos_api_key는 None이어야 한다.
+    assert config.ecos_api_key is None
+
+
+def test_load_config_blank_ecos_key_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_valid_environment(monkeypatch)
+    # 공백만 있는 값은 미설정과 동일하게 None으로 처리한다.
+    monkeypatch.setenv("ECOS_API_KEY", "   ")
+
+    config = load_config()
+
+    assert config.ecos_api_key is None
+
+
 def test_load_config_missing_variables_reports_all(monkeypatch: pytest.MonkeyPatch) -> None:
     for environment_variable_name in REQUIRED_ENVIRONMENT_VARIABLE_NAMES:
         monkeypatch.delenv(environment_variable_name, raising=False)

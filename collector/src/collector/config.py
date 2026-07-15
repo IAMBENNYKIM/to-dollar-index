@@ -35,6 +35,9 @@ class CollectorConfig:
     # KOSIS(한국부동산원) 오픈API 키. 부동산 지표 수집에만 쓰이며, 없어도 주식/환율 수집은 동작해야
     # 하므로 선택값(None 허용)이다.
     kosis_api_key: str | None = None
+    # 한국은행 ECOS 오픈API 키. KIS 환율 조회 실패 시 폴백에만 쓰이며, 없으면 폴백 없이
+    # 기존 동작(에러 전파)을 유지하므로 선택값(None 허용)이다.
+    ecos_api_key: str | None = None
 
 
 def _load_dotenv_once() -> None:
@@ -145,6 +148,13 @@ def load_config() -> CollectorConfig:
         if raw_kosis_api_key is not None and raw_kosis_api_key.strip()
         else None
     )
+    # ECOS 키도 선택적으로만 읽는다. 없으면 None으로 두고 환율 폴백만 건너뛴다.
+    raw_ecos_api_key = os.environ.get("ECOS_API_KEY")
+    ecos_api_key = (
+        raw_ecos_api_key.strip()
+        if raw_ecos_api_key is not None and raw_ecos_api_key.strip()
+        else None
+    )
     return CollectorConfig(
         kis_app_key=resolved_values["kis_app_key"],
         kis_app_secret=resolved_values["kis_app_secret"],
@@ -152,4 +162,5 @@ def load_config() -> CollectorConfig:
         supabase_url=resolved_values["supabase_url"],
         supabase_service_role_key=resolved_values["supabase_service_role_key"],
         kosis_api_key=kosis_api_key,
+        ecos_api_key=ecos_api_key,
     )
