@@ -40,6 +40,7 @@ jobs:
           KIS_IS_MOCK: ${{ secrets.KIS_IS_MOCK }}
           KIS_BASE_URL: ${{ secrets.KIS_BASE_URL }}
           KOSIS_KEY: ${{ secrets.KOSIS_KEY }}
+          ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python -m collector.main backfill --from ${{ github.event.inputs.from_date || '2015-01-01' }}
@@ -52,3 +53,18 @@ jobs:
           git add .github/last-rebackfill.txt
           git diff --staged --quiet || git commit -m "chore: 월간 재백필 heartbeat"
           git push
+
+      - name: 실패 시 텔레그램 알림
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "텔레그램 시크릿이 없어 알림을 건너뜁니다."
+            exit 0
+          fi
+          curl -sS --fail-with-body "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="❌ ${{ github.workflow }} 실패
+          실행 로그: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
