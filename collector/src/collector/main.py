@@ -16,10 +16,11 @@ from collector.database_writer import (
     upsert_exchange_rates,
 )
 from collector.fetch_exchange_rates import fetch_usd_krw_exchange_rates
+from collector.fetch_exchange_rates_ecos import fetch_usd_krw_exchange_rates_ecos
 from collector.fetch_real_estate import fetch_real_estate_prices
 from collector.fetch_stock_prices import fetch_stock_daily_prices
 from collector.kis_auth import get_access_token
-from collector.kis_client import KisClient
+from collector.kis_client import KisClient, KisQuotationError
 
 # --indicator 식별자 규약. 환율은 고정 키, 주식은 'stock:종목코드', 부동산은 'real_estate:소스코드'.
 EXCHANGE_RATE_INDICATOR_KEY = "exchange_rate:USD_KRW"
@@ -164,7 +165,19 @@ def _collect_task_rows(
     real_estate_periods_count: int,
 ) -> list[dict]:
     if task.kind == TASK_KIND_EXCHANGE_RATE:
-        return fetch_usd_krw_exchange_rates(kis_client, start_date, end_date)
+        try:
+            return fetch_usd_krw_exchange_rates(kis_client, start_date, end_date)
+        except KisQuotationError as kis_error:
+            # ECOS 키가 없으면 폴백 없이 기존 동작(에러 전파 → per-task 실패 처리) 유지.
+            if config.ecos_api_key is None:
+                raise
+            print(
+                f"[{task.key}] KIS 환율 조회 실패, ECOS 폴백을 시도합니다: {kis_error}",
+                file=sys.stderr,
+            )
+            return fetch_usd_krw_exchange_rates_ecos(
+                config.ecos_api_key, start_date, end_date
+            )
     if task.kind == TASK_KIND_REAL_ESTATE:
         # 부동산은 월 데이터라 start/end 구간이 아니라 최근 개월 수(newEstPrdCnt)로 조회한다.
         return fetch_real_estate_prices(

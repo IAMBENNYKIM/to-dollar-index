@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from collector import main as main_module
+from collector.kis_client import KisQuotationError
 
 FIXED_TODAY = date(2026, 7, 13)
 
@@ -16,9 +17,12 @@ class FakeSupabaseClient:
     """수집 오케스트레이션 테스트용 placeholder. DB 접근 함수는 전부 monkeypatch로 대체된다."""
 
 
-def build_fake_config(kosis_api_key: str | None = None) -> SimpleNamespace:
-    # load_config 대체. 부동산 배선 분기에서 config.kosis_api_key만 참조하므로 그 필드만 채운다.
-    return SimpleNamespace(kosis_api_key=kosis_api_key)
+def build_fake_config(
+    kosis_api_key: str | None = None, ecos_api_key: str | None = None
+) -> SimpleNamespace:
+    # load_config 대체. 부동산 배선은 config.kosis_api_key를, 환율 폴백은 config.ecos_api_key를
+    # 참조하므로 그 두 필드만 채운다.
+    return SimpleNamespace(kosis_api_key=kosis_api_key, ecos_api_key=ecos_api_key)
 
 
 def build_backfill_arguments(
@@ -491,6 +495,87 @@ def test_daily_real_estate_recollects_recent_periods(patched_runtime, monkeypatc
 
     # 부동산은 최신 여부와 무관하게 항상 최근 개월 수로 재수집한다.
     assert real_estate_periods == [main_module.REAL_ESTATE_DAILY_PERIODS]
+
+
+def test_exchange_kis_failure_falls_back_to_ecos(patched_runtime, monkeypatch):
+    ecos_calls: list[tuple] = []
+    upserted_rows: list[list] = []
+
+    monkeypatch.setattr(
+        main_module, "load_config",
+        lambda: build_fake_config(ecos_api_key="ecos-key"),
+    )
+
+    def fake_fetch_kis(kis_client, start_date, end_date):
+        raise KisQuotationError("KIS 환율 일시 실패")
+
+    def fake_fetch_ecos(ecos_api_key, start_date, end_date):
+        ecos_calls.append((ecos_api_key, start_date, end_date))
+        return [build_exchange_rate_row(date(2026, 1, 2))]
+
+    monkeypatch.setattr(main_module, "fetch_usd_krw_exchange_rates", fake_fetch_kis)
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates_ecos", fake_fetch_ecos
+    )
+    monkeypatch.setattr(
+        main_module, "upsert_exchange_rates",
+        lambda client, rows: upserted_rows.append(rows) or len(rows),
+    )
+
+    # KIS 실패 + ECOS 키 있음 → 폴백 성공이므로 SystemExit 없이 정상 종료해야 한다.
+    main_module.run_backfill(
+        build_backfill_arguments(indicator="exchange_rate:USD_KRW")
+    )
+
+    assert ecos_calls == [("ecos-key", date(2026, 1, 1), FIXED_TODAY)]
+    # 폴백이 반환한 행이 그대로 upsert 되어야 한다.
+    assert len(upserted_rows) == 1
+    assert upserted_rows[0] == [build_exchange_rate_row(date(2026, 1, 2))]
+
+
+def test_exchange_kis_failure_without_ecos_key_exits_1(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "load_config",
+        lambda: build_fake_config(ecos_api_key=None),
+    )
+
+    def fake_fetch_kis(kis_client, start_date, end_date):
+        raise KisQuotationError("KIS 환율 일시 실패")
+
+    monkeypatch.setattr(main_module, "fetch_usd_krw_exchange_rates", fake_fetch_kis)
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates_ecos",
+        lambda *args, **kwargs: pytest.fail("ECOS 키가 없으면 폴백을 호출하면 안 된다"),
+    )
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+
+    # 키가 없으면 에러가 전파되어 per-task 실패로 처리 → exit 1.
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_backfill(
+            build_backfill_arguments(indicator="exchange_rate:USD_KRW")
+        )
+
+    assert exit_info.value.code == 1
+
+
+def test_exchange_kis_success_skips_ecos(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "load_config",
+        lambda: build_fake_config(ecos_api_key="ecos-key"),
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates",
+        lambda *args: [build_exchange_rate_row(date(2026, 1, 2))],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_usd_krw_exchange_rates_ecos",
+        lambda *args, **kwargs: pytest.fail("KIS 성공 시 ECOS를 호출하면 안 된다"),
+    )
+    monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
+
+    main_module.run_backfill(
+        build_backfill_arguments(indicator="exchange_rate:USD_KRW")
+    )
 
 
 def test_invalid_from_date_exits_with_code_1(patched_runtime, monkeypatch):
