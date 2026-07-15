@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
 import type { ExchangeRatePoint } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import EChartsBase from "./EChartsBase";
 
 /**
@@ -199,20 +200,20 @@ export default function ExchangeRateChart({
   if (points.length === 0) {
     return (
       <div
-        className={className}
-        style={{
-          height: 360,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
+        className={cn(
+          "flex h-[280px] items-center justify-center sm:h-[360px]",
+          className,
+        )}
       >
         <p className="text-sm text-muted-foreground">표시할 환율 데이터가 없습니다.</p>
       </div>
     );
   }
 
+  // 모바일에서 차트 높이를 줄인다. 컨테이너가 높이를 정하고 EChartsBase 가 100% 를 채운다.
   return (
-    <EChartsBase option={option} className={className} style={{ height: 360 }} />
+    <div className={cn("h-[280px] sm:h-[360px]", className)}>
+      <EChartsBase option={option} style={{ height: "100%" }} />
+    </div>
   );
 }

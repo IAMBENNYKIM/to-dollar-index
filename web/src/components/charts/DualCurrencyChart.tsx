@@ -107,6 +107,32 @@ function useIsDarkMode(): boolean {
   return isDark;
 }
 
+/**
+ * 뷰포트 너비가 좁은지(모바일, max-width 639px = tailwind sm 미만) 관찰한다.
+ * useIsDarkMode 와 동일한 matchMedia 구독 패턴을 따른다. 좁은 화면에서 차트 옵션을
+ * 콤팩트하게(축 이름 숨김, 여백·글씨 축소) 조정하는 데 사용한다.
+ */
+function useIsNarrowViewport(): boolean {
+  const [isNarrow, setIsNarrow] = useState(false);
+
+  useEffect(() => {
+    const narrowQuery = window.matchMedia("(max-width: 639px)");
+
+    const compute = () => {
+      setIsNarrow(narrowQuery.matches);
+    };
+
+    compute();
+    narrowQuery.addEventListener("change", compute);
+
+    return () => {
+      narrowQuery.removeEventListener("change", compute);
+    };
+  }, []);
+
+  return isNarrow;
+}
+
 const KRW_FORMATTER = new Intl.NumberFormat("ko-KR", {
   maximumFractionDigits: 0,
 });
@@ -122,11 +148,15 @@ const USD_SERIES_NAME = "달러 (USD)";
 function buildOption(
   points: DualCurrencyPoint[],
   theme: DualChartTheme,
+  isNarrow: boolean,
 ): EChartsOption {
   const categories = points.map((point) => point.priceDate);
   const krwData = points.map((point) => point.closePriceKrw);
   // 달러 데이터가 없는(환율 이전) 포인트는 null 로 두어 선이 끊기게 한다.
   const usdData = points.map((point) => point.closePriceUsd);
+
+  // 좁은 화면에서는 축 이름을 숨기고 여백·글씨를 줄여 좁은 폭을 확보한다.
+  const axisLabelFontSize = isNarrow ? 10 : 11;
 
   return {
     backgroundColor: "transparent",
@@ -143,7 +173,7 @@ function buildOption(
     grid: {
       left: 12,
       right: 12,
-      top: 44,
+      top: isNarrow ? 36 : 44,
       bottom: 64,
       containLabel: true,
     },
@@ -193,14 +223,18 @@ function buildOption(
       boundaryGap: false,
       axisLine: { lineStyle: { color: theme.axisLine } },
       axisTick: { show: false },
-      axisLabel: { color: theme.muted, fontSize: 11, hideOverlap: true },
+      axisLabel: {
+        color: theme.muted,
+        fontSize: axisLabelFontSize,
+        hideOverlap: true,
+      },
       splitLine: { show: false },
     },
     yAxis: [
       {
         // 좌축: 원화(KRW). 축선/라벨을 원화 계열색으로 물들여 축-통화 대응을 명확히 한다.
         type: "value",
-        name: KRW_SERIES_NAME,
+        name: isNarrow ? "" : KRW_SERIES_NAME,
         position: "left",
         scale: true,
         nameTextStyle: { color: theme.krwSeries, fontSize: 11, align: "left" },
@@ -208,7 +242,7 @@ function buildOption(
         axisTick: { show: false },
         axisLabel: {
           color: theme.krwSeries,
-          fontSize: 11,
+          fontSize: axisLabelFontSize,
           formatter: (value: number) => KRW_FORMATTER.format(value),
         },
         splitLine: { lineStyle: { color: theme.gridline, type: "solid" } },
@@ -216,7 +250,7 @@ function buildOption(
       {
         // 우축: 달러(USD).
         type: "value",
-        name: USD_SERIES_NAME,
+        name: isNarrow ? "" : USD_SERIES_NAME,
         position: "right",
         scale: true,
         nameTextStyle: { color: theme.usdSeries, fontSize: 11, align: "right" },
@@ -224,7 +258,7 @@ function buildOption(
         axisTick: { show: false },
         axisLabel: {
           color: theme.usdSeries,
-          fontSize: 11,
+          fontSize: axisLabelFontSize,
           formatter: (value: number) => USD_FORMATTER.format(value),
         },
         // 두 번째 축의 격자선은 그리지 않아 격자 중복을 피한다.
@@ -242,7 +276,7 @@ function buildOption(
         xAxisIndex: 0,
         filterMode: "none",
         bottom: 12,
-        height: 24,
+        height: isNarrow ? 20 : 24,
         borderColor: theme.border,
         fillerColor: theme.zoomFill,
         dataBackground: {
@@ -332,10 +366,14 @@ export default function DualCurrencyChart({
 }: DualCurrencyChartProps) {
   const isDark = useIsDarkMode();
   const theme = isDark ? DARK_THEME : LIGHT_THEME;
+  const isNarrow = useIsNarrowViewport();
 
-  // 옵션은 points/theme 에만 의존하도록 memo 한다. 구간 수익률 state 가 바뀌어도
+  // 옵션은 points/theme/isNarrow 에만 의존하도록 memo 한다. 구간 수익률 state 가 바뀌어도
   // 옵션 객체가 유지되어 dataZoom 이 초기화(리셋)되지 않는다.
-  const option = useMemo(() => buildOption(points, theme), [points, theme]);
+  const option = useMemo(
+    () => buildOption(points, theme, isNarrow),
+    [points, theme, isNarrow],
+  );
 
   // 초기 표시: 전체 구간(0~마지막 인덱스)의 수익률.
   const [rangeReturns, setRangeReturns] = useState<RangeReturns | null>(() =>
@@ -472,14 +510,7 @@ export default function DualCurrencyChart({
   if (points.length === 0) {
     return (
       <div className="flex flex-col gap-4">
-        <div
-          style={{
-            height: 420,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
+        <div className="flex h-[320px] items-center justify-center sm:h-[420px]">
           <p className="text-sm text-muted-foreground">
             {indicatorName}의 시계열 데이터가 없습니다.
           </p>
@@ -507,9 +538,9 @@ export default function DualCurrencyChart({
           ))}
         </div>
 
-        {/* 날짜 직접 입력: 시작일/종료일 + 적용 */}
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {/* 날짜 직접 입력: 시작일/종료일 + 적용. 모바일에서는 세로로 쌓는다. */}
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <label className="flex w-full items-center gap-1.5 text-xs text-muted-foreground sm:w-auto">
             시작일
             <input
               type="date"
@@ -517,11 +548,11 @@ export default function DualCurrencyChart({
               min={firstDate}
               max={lastDate}
               onChange={(event) => setStartDateInput(event.target.value)}
-              className="h-7 rounded-md border border-border bg-background px-2 text-[0.8rem] text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:border-input dark:bg-input/30 [color-scheme:light] dark:[color-scheme:dark]"
+              className="h-7 w-full rounded-md border border-border bg-background px-2 text-[0.8rem] text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 sm:w-auto dark:border-input dark:bg-input/30 [color-scheme:light] dark:[color-scheme:dark]"
             />
           </label>
-          <span className="text-xs text-muted-foreground">~</span>
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="hidden text-xs text-muted-foreground sm:inline">~</span>
+          <label className="flex w-full items-center gap-1.5 text-xs text-muted-foreground sm:w-auto">
             종료일
             <input
               type="date"
@@ -529,7 +560,7 @@ export default function DualCurrencyChart({
               min={firstDate}
               max={lastDate}
               onChange={(event) => setEndDateInput(event.target.value)}
-              className="h-7 rounded-md border border-border bg-background px-2 text-[0.8rem] text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:border-input dark:bg-input/30 [color-scheme:light] dark:[color-scheme:dark]"
+              className="h-7 w-full rounded-md border border-border bg-background px-2 text-[0.8rem] text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 sm:w-auto dark:border-input dark:bg-input/30 [color-scheme:light] dark:[color-scheme:dark]"
             />
           </label>
           <Button type="button" variant="outline" size="sm" onClick={handleApplyDates}>
@@ -538,12 +569,14 @@ export default function DualCurrencyChart({
         </div>
       </div>
 
-      <EChartsBase
-        option={option}
-        onEvents={chartEvents}
-        onChartReady={handleChartReady}
-        style={{ height: 420 }}
-      />
+      <div className="h-[320px] sm:h-[420px]">
+        <EChartsBase
+          option={option}
+          onEvents={chartEvents}
+          onChartReady={handleChartReady}
+          style={{ height: "100%" }}
+        />
+      </div>
       <RangeReturnPanel rangeReturns={rangeReturns} />
     </div>
   );

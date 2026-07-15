@@ -35,12 +35,9 @@ export default function IndicatorDetailLoading() {
               <div className="h-4 w-72 max-w-full rounded bg-muted" />
             </div>
           </CardHeader>
-          {/* 차트 영역(실제 차트 높이 420px 와 동일) */}
+          {/* 차트 영역(실제 차트 반응형 높이 320/420px 와 동일) */}
           <div className="flex flex-col gap-4">
-            <div
-              className="animate-pulse rounded-md bg-muted"
-              style={{ height: 420 }}
-            />
+            <div className="h-[320px] animate-pulse rounded-md bg-muted sm:h-[420px]" />
             {/* 구간 수익률 패널 자리 */}
             <div className="grid animate-pulse grid-cols-2 gap-4 sm:grid-cols-4">
               <div className="h-16 rounded-md bg-muted" />
