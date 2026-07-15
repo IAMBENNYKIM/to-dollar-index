@@ -320,6 +320,43 @@ export async function fetchDailyPricesWithUsd(
 }
 
 /**
+ * 홈 대시보드 요약용 경량 조회. 특정 지표의 최신 rowLimit 개 이중 통화 포인트를
+ * price_date 오름차순으로 반환한다.
+ *
+ * 전량 페이지네이션(fetchAllRows)과 달리 최신 행만 내림차순으로 limit 조회한 뒤
+ * reverse 하므로, 홈에서 지표 수만큼 병렬 호출해도 부담이 적다.
+ * indicatorType 이 "real_estate" 면 월별 뷰, 그 외에는 일봉 뷰를 사용한다.
+ */
+export async function fetchLatestDualCurrencyPoints(
+  indicatorId: string,
+  indicatorType: string,
+  rowLimit: number,
+): Promise<DualCurrencyPoint[]> {
+  const supabase = createSupabaseServerClient();
+  const viewName =
+    indicatorType === "real_estate"
+      ? "real_estate_prices_with_usd"
+      : "daily_prices_with_usd";
+
+  const { data, error } = await supabase
+    .from(viewName)
+    .select("price_date, close_price_krw, usd_krw_rate, close_price_usd")
+    .eq("indicator_id", indicatorId)
+    .order("price_date", { ascending: false })
+    .limit(rowLimit);
+
+  if (error) {
+    throw new Error(
+      `지표(${indicatorId}) 최신 시계열 조회 중 오류가 발생했습니다: ${error.message}`,
+    );
+  }
+
+  // 내림차순(최신순)으로 가져온 행을 오름차순으로 되돌린다.
+  const rows = ((data ?? []) as DualCurrencyRow[]).slice().reverse();
+  return rows.map(mapDualCurrencyRow);
+}
+
+/**
  * 뷰 real_estate_prices_with_usd 에서 특정 부동산 지표의 이중 통화 월별 시계열을
  * price_date 오름차순으로 전량 조회한다.
  *
