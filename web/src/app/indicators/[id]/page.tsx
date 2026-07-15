@@ -8,6 +8,7 @@ import {
 } from "@/lib/indicatorQueries";
 import type { DualCurrencyPoint, Indicator } from "@/lib/types";
 import DualCurrencyChart from "@/components/charts/DualCurrencyChart";
+import DataFreshnessBadge from "@/components/DataFreshnessBadge";
 import {
   Card,
   CardDescription,
@@ -100,6 +101,10 @@ export default async function IndicatorDetailPage({
                     : "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
                   : "표시할 시계열 데이터가 없습니다."}
             </CardDescription>
+            <DataFreshnessBadge
+              latestDate={points.at(-1)?.priceDate ?? null}
+              staleAfterBusinessDays={isRealEstate ? null : 2}
+            />
           </CardHeader>
           <DualCurrencyChart points={points} indicatorName={displayName} />
         </Card>
