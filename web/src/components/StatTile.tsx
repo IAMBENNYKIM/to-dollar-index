@@ -32,7 +32,11 @@ export interface StatTileProps {
   className?: string;
 }
 
-const DIRECTION_META: Record<
+/**
+ * 방향(up/down/flat)별 색·아이콘 메타. 다른 컴포넌트(예: IndicatorCard)에서
+ * 변동률 표시를 일관되게 재사용할 수 있도록 export 한다.
+ */
+export const DIRECTION_META: Record<
   StatTileDeltaDirection,
   { color: string; Icon: typeof ArrowUpRight }
 > = {

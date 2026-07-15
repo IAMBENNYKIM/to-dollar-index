@@ -1,8 +1,7 @@
-import Link from "next/link";
-import { ChevronRight } from "lucide-react";
 import {
   fetchActiveIndicators,
   fetchExchangeRateHistory,
+  fetchLatestDualCurrencyPoints,
 } from "@/lib/indicatorQueries";
 import type { ExchangeRatePoint, Indicator } from "@/lib/types";
 import {
@@ -10,7 +9,13 @@ import {
   getDailyChange,
   getRangeChangePercent,
 } from "@/lib/exchangeRateStats";
+import {
+  buildIndicatorSummary,
+  type IndicatorSummary,
+} from "@/lib/indicatorSummary";
 import ExchangeRateChart from "@/components/charts/ExchangeRateChart";
+import DataFreshnessBadge from "@/components/DataFreshnessBadge";
+import IndicatorCard from "@/components/IndicatorCard";
 import StatTile, {
   type StatTileDelta,
   type StatTileDeltaDirection,
@@ -80,6 +85,23 @@ export default async function Home() {
     indicators = [];
   }
 
+  // 지표별 최신 2개 포인트를 병렬 조회해 카드 요약(최신값·변동률)을 만든다.
+  // 개별 지표 조회 실패는 해당 지표만 summary null 로 처리하고 나머지는 유지한다.
+  const indicatorSummaries: Array<IndicatorSummary | null> = await Promise.all(
+    indicators.map(async (indicator) => {
+      try {
+        const latestPoints = await fetchLatestDualCurrencyPoints(
+          indicator.id,
+          indicator.indicatorType,
+          2,
+        );
+        return buildIndicatorSummary(latestPoints);
+      } catch {
+        return null;
+      }
+    }),
+  );
+
   const currentRate = getCurrentRate(rateHistory);
   const dailyChange = getDailyChange(rateHistory);
   const change30d = getRangeChangePercent(rateHistory, 30);
@@ -147,6 +169,7 @@ export default async function Home() {
                 ? "USD·KRW 종가 기준 시계열"
                 : "환율 데이터를 불러오지 못했습니다."}
             </CardDescription>
+            <DataFreshnessBadge latestDate={rateHistory.at(-1)?.rateDate ?? null} />
           </CardHeader>
           <ExchangeRateChart points={rateHistory} />
         </Card>
@@ -161,29 +184,12 @@ export default async function Home() {
           </p>
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {indicators.map((indicator) => (
-              <Link
+            {indicators.map((indicator, index) => (
+              <IndicatorCard
                 key={indicator.id}
-                href={`/indicators/${indicator.id}`}
-                className="group block rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <Card className="gap-2 px-5 transition-colors group-hover:bg-muted/50">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex flex-col gap-1">
-                      <span className="font-medium text-foreground">
-                        {indicator.displayName}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {indicator.indicatorType} · {indicator.sourceCode}
-                      </span>
-                    </div>
-                    <ChevronRight
-                      className="size-5 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5"
-                      aria-hidden
-                    />
-                  </div>
-                </Card>
-              </Link>
+                indicator={indicator}
+                summary={indicatorSummaries[index]}
+              />
             ))}
           </div>
         )}
