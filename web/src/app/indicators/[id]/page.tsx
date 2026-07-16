@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import {
+  fetchActiveIndicators,
   fetchDailyPricesWithUsd,
   fetchIndicatorById,
   fetchRealEstateMonthlyWithUsd,
@@ -18,6 +19,17 @@ import {
 
 // ISR: 1시간마다 재생성.
 export const revalidate = 3600;
+
+// 미등록 id는 서버 렌더 없이 즉시 404(비용/DoS 표면 제거). 새 지표는 DB 등록 후 재배포해야 상세 페이지가 열린다.
+export const dynamicParams = false;
+
+// 활성 지표만 빌드 타임에 프리렌더한다. dynamicParams=false와 결합돼 미등록 id는 서버 호출 없이 404된다.
+export async function generateStaticParams(): Promise<{ id: string }[]> {
+  // 일부러 예외를 삼키지 않는다: 여기서 빈 배열을 반환하면 dynamicParams=false 탓에 모든 상세 페이지가 404되는
+  // 더 나쁜 배포가 나가므로, 조회 실패 시 빌드를 깨뜨려 Vercel이 직전 정상 배포를 유지하게 한다.
+  const indicators = await fetchActiveIndicators();
+  return indicators.map((indicator) => ({ id: indicator.id }));
+}
 
 // Vercel 배포 시 인천(서울) 리전을 선호한다. Supabase 서울 리전과 가까워 서버-DB 왕복이 짧아진다.
 // (Hobby 플랜에서는 무시될 수 있으나 무해하다.)
