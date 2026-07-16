@@ -71,8 +71,18 @@ def fetch_real_estate_prices(
 
 
 def _request_kosis(http_client: httpx.Client, request_parameters: dict) -> object:
-    response = http_client.get(KOSIS_PARAM_URL, params=request_parameters)
-    response.raise_for_status()
+    try:
+        response = http_client.get(KOSIS_PARAM_URL, params=request_parameters)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as http_error:
+        # 요청 쿼리스트링(apiKey)에 API 키가 포함되므로 httpx 예외 메시지를 그대로 전파하지 않는다.
+        raise RealEstateFetchError(
+            f"KOSIS HTTP {http_error.response.status_code} 오류"
+        ) from None
+    except httpx.HTTPError as http_error:
+        raise RealEstateFetchError(
+            f"KOSIS 요청 실패: {type(http_error).__name__}"
+        ) from None
     return response.json()
 
 

@@ -136,6 +136,44 @@ def test_other_result_code_raises() -> None:
 
 
 @respx.mock
+def test_http_error_does_not_leak_api_key() -> None:
+    # 500 응답 시 도메인 에러로 변환되고, URL 경로의 API 키가 예외 메시지에 남지 않아야 한다.
+    respx.get(url__startswith=ECOS_API_BASE_URL).mock(
+        return_value=httpx.Response(500, text="Internal Server Error")
+    )
+
+    with pytest.raises(EcosFetchError) as error_info:
+        fetch_usd_krw_exchange_rates_ecos(
+            ecos_api_key="test-secret-key",
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            http_client=httpx.Client(),
+        )
+
+    assert "500" in str(error_info.value)
+    assert "test-secret-key" not in str(error_info.value)
+
+
+@respx.mock
+def test_timeout_does_not_leak_api_key() -> None:
+    # 타임아웃 등 전송 계층 오류도 도메인 에러로 변환되고 API 키가 노출되지 않아야 한다.
+    respx.get(url__startswith=ECOS_API_BASE_URL).mock(
+        side_effect=httpx.TimeoutException("timed out")
+    )
+
+    with pytest.raises(EcosFetchError) as error_info:
+        fetch_usd_krw_exchange_rates_ecos(
+            ecos_api_key="test-secret-key",
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            http_client=httpx.Client(),
+        )
+
+    assert "요청 실패" in str(error_info.value)
+    assert "test-secret-key" not in str(error_info.value)
+
+
+@respx.mock
 def test_skips_rows_with_empty_data_value() -> None:
     respx.get(url__startswith=ECOS_API_BASE_URL).mock(
         return_value=httpx.Response(

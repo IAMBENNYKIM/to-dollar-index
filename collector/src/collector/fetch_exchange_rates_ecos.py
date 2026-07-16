@@ -62,8 +62,14 @@ def fetch_usd_krw_exchange_rates_ecos(
 
 
 def _request_ecos(http_client: httpx.Client, request_url: str) -> object:
-    response = http_client.get(request_url)
-    response.raise_for_status()
+    try:
+        response = http_client.get(request_url)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as http_error:
+        # 요청 URL에 API 키가 포함되므로 httpx 예외 메시지를 그대로 전파하지 않는다.
+        raise EcosFetchError(f"ECOS HTTP {http_error.response.status_code} 오류") from None
+    except httpx.HTTPError as http_error:
+        raise EcosFetchError(f"ECOS 요청 실패: {type(http_error).__name__}") from None
     return response.json()
 
 

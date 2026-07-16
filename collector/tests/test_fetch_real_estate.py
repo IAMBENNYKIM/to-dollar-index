@@ -120,3 +120,39 @@ def test_error_object_response_raises() -> None:
         )
 
     assert "인증키가 유효하지 않습니다." in str(error_info.value)
+
+
+@respx.mock
+def test_http_error_does_not_leak_api_key() -> None:
+    # 500 응답 시 도메인 에러로 변환되고, 쿼리스트링(apiKey)의 키가 예외 메시지에 남지 않아야 한다.
+    respx.get(KOSIS_PARAM_URL).mock(
+        return_value=httpx.Response(500, text="Internal Server Error")
+    )
+
+    with pytest.raises(RealEstateFetchError) as error_info:
+        fetch_real_estate_prices(
+            kosis_api_key="test-secret-key",
+            indicator_id="re-1",
+            periods_count=400,
+            http_client=httpx.Client(),
+        )
+
+    assert "500" in str(error_info.value)
+    assert "test-secret-key" not in str(error_info.value)
+
+
+@respx.mock
+def test_timeout_does_not_leak_api_key() -> None:
+    # 타임아웃 등 전송 계층 오류도 도메인 에러로 변환되고 API 키가 노출되지 않아야 한다.
+    respx.get(KOSIS_PARAM_URL).mock(side_effect=httpx.TimeoutException("timed out"))
+
+    with pytest.raises(RealEstateFetchError) as error_info:
+        fetch_real_estate_prices(
+            kosis_api_key="test-secret-key",
+            indicator_id="re-1",
+            periods_count=400,
+            http_client=httpx.Client(),
+        )
+
+    assert "요청 실패" in str(error_info.value)
+    assert "test-secret-key" not in str(error_info.value)
