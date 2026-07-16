@@ -43,7 +43,8 @@ jobs:
           ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python -m collector.main backfill --from ${{ github.event.inputs.from_date || '2015-01-01' }}
+          FROM_DATE: ${{ github.event.inputs.from_date || '2015-01-01' }}
+        run: python -m collector.main backfill --from "$FROM_DATE"
 
       - name: Keepalive heartbeat
         run: |
