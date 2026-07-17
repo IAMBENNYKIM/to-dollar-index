@@ -5,6 +5,7 @@ import {
   fetchActiveIndicators,
   fetchDailyPricesWithUsd,
   fetchIndicatorById,
+  fetchMinimumWageYearlyWithUsd,
   fetchRealEstateMonthlyWithUsd,
 } from "@/lib/indicatorQueries";
 import type { DualCurrencyPoint, Indicator } from "@/lib/types";
@@ -61,16 +62,24 @@ export default async function IndicatorDetailPage({
     notFound();
   }
 
-  // 부동산은 월별 데이터라 해당 월 평균 환율로 환산하는 전용 뷰를 사용한다.
-  // 주식 등 일봉 지표는 기존 시점 환율 폴백 뷰(daily_prices_with_usd)를 그대로 쓴다.
-  const isRealEstate = indicator?.indicatorType === "real_estate";
+  // 지표 타입에 따라 USD 환산 전용 뷰를 분기한다.
+  // - real_estate: 월별 데이터라 해당 월 평균 환율로 환산하는 전용 뷰.
+  // - minimum_wage: 연간 데이터라 해당 연도 평균 환율로 환산하는 전용 뷰.
+  // - 그 외(주식 등 일봉): 기존 시점 환율 폴백 뷰(daily_prices_with_usd).
+  const indicatorType = indicator?.indicatorType;
+  const isRealEstate = indicatorType === "real_estate";
+  const isMinimumWage = indicatorType === "minimum_wage";
 
   let points: DualCurrencyPoint[] = [];
   if (indicator) {
     try {
-      points = isRealEstate
-        ? await fetchRealEstateMonthlyWithUsd(indicator.id)
-        : await fetchDailyPricesWithUsd(indicator.id);
+      if (isRealEstate) {
+        points = await fetchRealEstateMonthlyWithUsd(indicator.id);
+      } else if (isMinimumWage) {
+        points = await fetchMinimumWageYearlyWithUsd(indicator.id);
+      } else {
+        points = await fetchDailyPricesWithUsd(indicator.id);
+      }
     } catch {
       points = [];
     }
@@ -110,12 +119,14 @@ export default async function IndicatorDetailPage({
                 : points.length > 0
                   ? isRealEstate
                     ? "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 한국부동산원 월별·59㎡ 환산·월평균 환율 기준. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
-                    : "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
+                    : isMinimumWage
+                      ? "좌축은 원화(KRW) 시간급, 우축은 달러(USD) 환산가입니다. 최저임금위원회 고시 연도별·연평균 환율 기준. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
+                      : "좌축은 원화(KRW) 종가, 우축은 달러(USD) 환산가입니다. 상단 프리셋 버튼·날짜 입력 또는 하단 슬라이더로 기간을 조절하면 구간 수익률이 갱신됩니다."
                   : "표시할 시계열 데이터가 없습니다."}
             </CardDescription>
             <DataFreshnessBadge
               latestDate={points.at(-1)?.priceDate ?? null}
-              staleAfterBusinessDays={isRealEstate ? null : 2}
+              staleAfterBusinessDays={isRealEstate || isMinimumWage ? null : 2}
             />
           </CardHeader>
           <DualCurrencyChart points={points} indicatorName={displayName} />

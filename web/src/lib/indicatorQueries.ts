@@ -325,7 +325,8 @@ export async function fetchDailyPricesWithUsd(
  *
  * 전량 페이지네이션(fetchAllRows)과 달리 최신 행만 내림차순으로 limit 조회한 뒤
  * reverse 하므로, 홈에서 지표 수만큼 병렬 호출해도 부담이 적다.
- * indicatorType 이 "real_estate" 면 월별 뷰, 그 외에는 일봉 뷰를 사용한다.
+ * indicatorType 이 "real_estate" 면 월평균 뷰, "minimum_wage" 면 연평균 뷰,
+ * 그 외에는 일봉 뷰를 사용한다.
  */
 export async function fetchLatestDualCurrencyPoints(
   indicatorId: string,
@@ -333,10 +334,12 @@ export async function fetchLatestDualCurrencyPoints(
   rowLimit: number,
 ): Promise<DualCurrencyPoint[]> {
   const supabase = createSupabaseServerClient();
-  const viewName =
-    indicatorType === "real_estate"
-      ? "real_estate_prices_with_usd"
-      : "daily_prices_with_usd";
+  // 지표 타입별 USD 환산 뷰 매핑. 매핑에 없으면 기본 일봉 뷰로 폴백한다.
+  const viewNameByType: Record<string, string> = {
+    real_estate: "real_estate_prices_with_usd",
+    minimum_wage: "minimum_wage_prices_with_usd",
+  };
+  const viewName = viewNameByType[indicatorType] ?? "daily_prices_with_usd";
 
   const { data, error } = await supabase
     .from(viewName)
@@ -386,6 +389,41 @@ export async function fetchRealEstateMonthlyWithUsd(
   const rows = await fetchAllRows(
     fetchPage,
     `부동산 월별 시계열(${indicatorId})`,
+    countRows,
+  );
+  return rows.map(mapDualCurrencyRow);
+}
+
+/**
+ * 뷰 minimum_wage_prices_with_usd 에서 특정 최저임금 지표의 이중 통화 연도별 시계열을
+ * price_date 오름차순으로 전량 조회한다.
+ *
+ * 최저임금은 연간 데이터이므로 해당 연도의 평균 USD_KRW 환율로 환산한 뷰를 사용한다.
+ * 반환 컬럼·매핑(mapDualCurrencyRow)은 fetchDailyPricesWithUsd 와 동일하다.
+ */
+export async function fetchMinimumWageYearlyWithUsd(
+  indicatorId: string,
+): Promise<DualCurrencyPoint[]> {
+  const supabase = createSupabaseServerClient();
+
+  const fetchPage: PageFetcher<DualCurrencyRow> = (from, to) =>
+    supabase
+      .from("minimum_wage_prices_with_usd")
+      .select("price_date, close_price_krw, usd_krw_rate, close_price_usd")
+      .eq("indicator_id", indicatorId)
+      .order("price_date", { ascending: true })
+      .range(from, to);
+
+  // 총 행수를 먼저 구해 페이지들을 병렬 조회한다(head+count → 본문 전송 없음).
+  const countRows: RowCounter = () =>
+    supabase
+      .from("minimum_wage_prices_with_usd")
+      .select("price_date", { count: "exact", head: true })
+      .eq("indicator_id", indicatorId);
+
+  const rows = await fetchAllRows(
+    fetchPage,
+    `최저임금 연도별 시계열(${indicatorId})`,
     countRows,
   );
   return rows.map(mapDualCurrencyRow);
