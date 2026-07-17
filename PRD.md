@@ -78,8 +78,8 @@
   - **주가**: KIS 오픈API 국내주식 기간별시세(`FHKST03010100`, 수정주가).
   - **환율**: KIS 오픈API 해외주식 종목/지수/환율 기간별시세(`FHKST03030100`, `FID_COND_MRKT_DIV_CODE='X'`).
     - **리스크·대안**: 환율 TR에 환율 조회 시장구분('X')은 존재하나, 원/달러의 정확한 `FID_INPUT_ISCD`가 공식 문서에 미확정. 구현 시 **실계좌 dry-run으로 종목코드를 확정**하며, 확정 실패 시 **한국은행 ECOS API로 환율 소스를 교체**한다.
-  - **최저임금**: 사용자 제공 정적 시드.
-  - **부동산**: 국토부 아파트 실거래가 공공 API, 월 평균 집계.
+  - **최저임금**: 최저임금위원회 고시 시간급(minimumwage.go.kr) 정적 시드(2015~, 연 1행). USD 환산은 해당 연도 **연평균 환율** 기준.
+  - **부동산**: KOSIS 한국부동산원 통계표(서울 소형 아파트), 59㎡ 환산·월별. USD 환산은 해당 월 **월평균 환율** 기준. *(당초 국토부 실거래가 API에서 교체)*
 
 ### 데이터베이스 (supabase/)
 - Supabase(PostgreSQL). 달러 환산은 저장하지 않고 **조회 시점 뷰에서 계산**.
@@ -111,6 +111,7 @@ to-dollar-index/
 | `real_estate_monthly` | 구별 월평균 실거래가 | region, year_month, avg_price_krw |
 
 - **뷰 `daily_prices_with_usd`**: `daily_prices`에 당일 환율을 조인해 달러 환산 값을 계산. 당일 환율이 없으면 **직전 환율로 폴백**. 달러 값은 물리적으로 저장하지 않고 이 뷰에서 파생.
+- **설계 개정(Phase 2·3)**: 최저임금·부동산은 전용 테이블(`minimum_wages`/`real_estate_monthly`) 대신 **`daily_prices`를 재사용**한다(지표 타입 `minimum_wage`/`real_estate`, `price_date`=연/월 시작일, `close_price`=원화 원본). USD 환산은 조회 시점 환율이 아니라 각각 **연평균 뷰**(`minimum_wage_prices_with_usd`, `date_trunc('year')`)·**월평균 뷰**(`real_estate_prices_with_usd`, `date_trunc('month')`)로 파생한다(연/월 데이터는 평균 환율이 의미상 정확하며, 진행 중인 기간은 해당 기간 평균이 확정 전까지 갱신됨). 초기 스키마의 두 전용 테이블(`minimum_wages`/`real_estate_monthly`)은 현재 미사용(하위호환 잔존).
 
 ## 9. 단계별 범위
 
@@ -120,11 +121,11 @@ to-dollar-index/
 - ECharts dataZoom 구간 수익률(원화%, 달러%, 환율효과%p).
 
 ### Phase 2 — 최저임금
-- 연도별 최저임금 원화/달러 비교 (정적 데이터).
+- 연도별 최저임금(시간급) 원화/달러 비교 (정적 데이터, 연평균 환율).
 
 ### Phase 3 — 부동산
-- 서울 구별 월평균 원화/달러 비교.
-- 국토부 아파트 실거래가 API 수집 포함.
+- 서울 소형 아파트(59㎡ 환산) 월별 원화/달러 비교 (월평균 환율).
+- KOSIS 한국부동산원 통계 수집 포함.
 
 ## 10. 엣지 케이스
 
