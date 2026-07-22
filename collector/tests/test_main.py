@@ -497,6 +497,80 @@ def test_daily_real_estate_recollects_recent_periods(patched_runtime, monkeypatc
     assert real_estate_periods == [main_module.REAL_ESTATE_DAILY_PERIODS]
 
 
+def test_daily_failure_writes_summary_file(patched_runtime, monkeypatch, tmp_path):
+    summary_file = tmp_path / "collect-failures.txt"
+    monkeypatch.setenv("COLLECT_FAILURE_SUMMARY_FILE", str(summary_file))
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    # 환율은 이미 최신이라 수집을 건너뛰고, 부동산만 실패시킨다.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+
+    def failing_real_estate(kosis_api_key, indicator_id, periods_count):
+        raise RuntimeError("KOSIS 요청 실패: ConnectTimeout")
+
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_daily(build_daily_arguments())
+
+    assert exit_info.value.code == 1
+    assert summary_file.exists()
+    summary_content = summary_file.read_text(encoding="utf-8")
+    assert "real_estate:seoul-small" in summary_content
+    assert "KOSIS 요청 실패" in summary_content
+
+
+def test_daily_failure_without_summary_env_skips_file(
+    patched_runtime, monkeypatch, tmp_path
+):
+    monkeypatch.delenv("COLLECT_FAILURE_SUMMARY_FILE", raising=False)
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+
+    def failing_real_estate(kosis_api_key, indicator_id, periods_count):
+        raise RuntimeError("KOSIS 요청 실패: ConnectTimeout")
+
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_daily(build_daily_arguments())
+
+    # 환경변수 미설정 시 요약 파일을 만들지 않고 여전히 exit 1로 끝난다.
+    assert exit_info.value.code == 1
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_exchange_kis_failure_falls_back_to_ecos(patched_runtime, monkeypatch):
     ecos_calls: list[tuple] = []
     upserted_rows: list[list] = []

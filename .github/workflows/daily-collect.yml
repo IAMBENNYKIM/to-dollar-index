@@ -39,6 +39,7 @@ jobs:
           ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          COLLECT_FAILURE_SUMMARY_FILE: ${{ runner.temp }}/collect-failures.txt
         run: python -m collector.main daily
 
       - name: 실패 시 텔레그램 알림
@@ -51,7 +52,15 @@ jobs:
             echo "텔레그램 시크릿이 없어 알림을 건너뜁니다."
             exit 0
           fi
+          SUMMARY_FILE="${{ runner.temp }}/collect-failures.txt"
+          FAILURE_DETAIL=""
+          if [ -f "$SUMMARY_FILE" ]; then
+            FAILURE_DETAIL="$(cat "$SUMMARY_FILE")"
+          fi
+          MESSAGE_TEXT="❌ ${{ github.workflow }} 실패
+          실패 지표:
+          ${FAILURE_DETAIL}
+          실행 로그: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -sS --fail-with-body "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode text="❌ ${{ github.workflow }} 실패
-          실행 로그: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --data-urlencode text="${MESSAGE_TEXT}"

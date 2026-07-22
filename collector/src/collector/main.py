@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -253,6 +254,27 @@ def _create_runtime_clients() -> tuple[KisClient, object, object]:
     return kis_client, supabase_client, config
 
 
+def _write_failure_summary(failure_lines: list[str]) -> None:
+    """실패 태스크 요약을 COLLECT_FAILURE_SUMMARY_FILE 경로에 기록한다.
+
+    워크플로 알림 스텝이 이 파일을 읽어 텔레그램 메시지에 실패 지표를 포함한다.
+    환경변수가 없거나 빈 문자열이면(로컬 실행 등) 아무것도 하지 않는다.
+    파일 쓰기 실패는 배치 종료 코드에 영향을 주지 않도록 경고만 남긴다.
+    """
+    summary_file_path = os.environ.get("COLLECT_FAILURE_SUMMARY_FILE")
+    if not summary_file_path:
+        return
+    try:
+        with open(summary_file_path, "w", encoding="utf-8") as summary_file:
+            for failure_line in failure_lines:
+                summary_file.write(f"{failure_line}\n")
+    except OSError as write_error:
+        print(
+            f"실패 요약 파일 기록에 실패했습니다: {type(write_error).__name__}",
+            file=sys.stderr,
+        )
+
+
 def run_backfill(arguments: argparse.Namespace) -> None:
     start_date = _parse_start_date(arguments.start_date)
     end_date = get_today_date()
@@ -272,6 +294,7 @@ def run_backfill(arguments: argparse.Namespace) -> None:
         sys.exit(1)
 
     had_failure = False
+    failure_summary_lines: list[str] = []
     for task in collection_tasks:
         try:
             # 부동산은 start/end를 무시하고 전량(REAL_ESTATE_BACKFILL_PERIODS)을 수집한다.
@@ -285,9 +308,11 @@ def run_backfill(arguments: argparse.Namespace) -> None:
             _print_task_summary(task, summary_start, summary_end, rows, arguments.dry_run)
         except Exception as collection_error:
             had_failure = True
+            failure_summary_lines.append(f"[{task.key}] {collection_error}")
             print(f"[{task.key}] 수집 실패: {collection_error}", file=sys.stderr)
 
     if had_failure:
+        _write_failure_summary(failure_summary_lines)
         sys.exit(1)
 
 
@@ -301,6 +326,7 @@ def run_daily(arguments: argparse.Namespace) -> None:
         sys.exit(1)
 
     had_failure = False
+    failure_summary_lines: list[str] = []
     for task in collection_tasks:
         try:
             if task.kind == TASK_KIND_REAL_ESTATE:
@@ -336,9 +362,11 @@ def run_daily(arguments: argparse.Namespace) -> None:
             _print_task_summary(task, start_date, end_date, rows, arguments.dry_run)
         except Exception as collection_error:
             had_failure = True
+            failure_summary_lines.append(f"[{task.key}] {collection_error}")
             print(f"[{task.key}] 수집 실패: {collection_error}", file=sys.stderr)
 
     if had_failure:
+        _write_failure_summary(failure_summary_lines)
         sys.exit(1)
 
 
