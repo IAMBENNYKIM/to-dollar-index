@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import time
 from datetime import date
 from decimal import Decimal
 
@@ -20,6 +22,11 @@ FLOOR_AREA_SQM = Decimal("59")
 MANWON_TO_KRW = Decimal("10000")
 
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
+
+# KOSIS는 해외(GitHub) 러너에서 간헐적으로 ConnectTimeout 등 전송계층 오류를 낸다(일시성 장애).
+# 전송계층 오류만 백오프 재시도한다. HTTP 상태 오류는 서버측 확정 응답이라 재시도하지 않는다.
+KOSIS_RETRY_MAX_ATTEMPTS = 3  # 총 시도 횟수(초기 1 + 재시도 2)
+KOSIS_RETRY_BACKOFF_SECONDS = (5.0, 15.0)  # 각 재시도 전 대기 시간(초)
 
 
 class RealEstateFetchError(RuntimeError):
@@ -71,19 +78,37 @@ def fetch_real_estate_prices(
 
 
 def _request_kosis(http_client: httpx.Client, request_parameters: dict) -> object:
-    try:
-        response = http_client.get(KOSIS_PARAM_URL, params=request_parameters)
-        response.raise_for_status()
-    except httpx.HTTPStatusError as http_error:
-        # 요청 쿼리스트링(apiKey)에 API 키가 포함되므로 httpx 예외 메시지를 그대로 전파하지 않는다.
-        raise RealEstateFetchError(
-            f"KOSIS HTTP {http_error.response.status_code} 오류"
-        ) from None
-    except httpx.HTTPError as http_error:
-        raise RealEstateFetchError(
-            f"KOSIS 요청 실패: {type(http_error).__name__}"
-        ) from None
-    return response.json()
+    for attempt_number in range(1, KOSIS_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            response = http_client.get(KOSIS_PARAM_URL, params=request_parameters)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as http_error:
+            # 요청 쿼리스트링(apiKey)에 API 키가 포함되므로 httpx 예외 메시지를 그대로 전파하지 않는다.
+            # HTTP 상태 오류는 서버측 확정 응답이라 재시도하지 않는다.
+            raise RealEstateFetchError(
+                f"KOSIS HTTP {http_error.response.status_code} 오류"
+            ) from None
+        except httpx.TransportError as http_error:
+            # ConnectTimeout 등 전송계층 오류는 일시성 장애다. 남은 시도가 있으면 백오프 후 재시도한다.
+            if attempt_number >= KOSIS_RETRY_MAX_ATTEMPTS:
+                raise RealEstateFetchError(
+                    f"KOSIS 요청 실패: {type(http_error).__name__}"
+                ) from None
+            # 로그에 API 키가 새지 않도록 예외 메시지 본문 대신 타입명과 시도 횟수만 남긴다.
+            print(
+                f"[real_estate] KOSIS 연결 실패({type(http_error).__name__}), "
+                f"재시도 {attempt_number}/{KOSIS_RETRY_MAX_ATTEMPTS - 1}...",
+                file=sys.stderr,
+            )
+            time.sleep(KOSIS_RETRY_BACKOFF_SECONDS[attempt_number - 1])
+        except httpx.HTTPError as http_error:
+            # TransportError·HTTPStatusError가 아닌 그 밖의 HTTP 오류는 재시도하지 않는다.
+            raise RealEstateFetchError(
+                f"KOSIS 요청 실패: {type(http_error).__name__}"
+            ) from None
+    # 루프는 반드시 return 하거나 raise 하므로 여기 도달하지 않는다.
+    raise AssertionError("unreachable")
 
 
 def _parse_real_estate_payload(response_payload: object, indicator_id: str) -> list[dict]:

@@ -14,6 +14,14 @@ from collector.fetch_real_estate import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_backoff_sleep(monkeypatch):
+    # 전송계층 오류 재시도 백오프를 무력화해 테스트가 실제로 대기하지 않게 한다.
+    monkeypatch.setattr(
+        "collector.fetch_real_estate.time.sleep", lambda _seconds: None
+    )
+
+
 def build_source_row(
     period: str,
     data_value: str,
@@ -125,7 +133,7 @@ def test_error_object_response_raises() -> None:
 @respx.mock
 def test_http_error_does_not_leak_api_key() -> None:
     # 500 응답 시 도메인 에러로 변환되고, 쿼리스트링(apiKey)의 키가 예외 메시지에 남지 않아야 한다.
-    respx.get(KOSIS_PARAM_URL).mock(
+    route = respx.get(KOSIS_PARAM_URL).mock(
         return_value=httpx.Response(500, text="Internal Server Error")
     )
 
@@ -139,6 +147,8 @@ def test_http_error_does_not_leak_api_key() -> None:
 
     assert "500" in str(error_info.value)
     assert "test-secret-key" not in str(error_info.value)
+    # HTTP 상태 오류는 재시도하지 않는다.
+    assert route.call_count == 1
 
 
 @respx.mock
@@ -154,5 +164,52 @@ def test_timeout_does_not_leak_api_key() -> None:
             http_client=httpx.Client(),
         )
 
+    assert "요청 실패" in str(error_info.value)
+    assert "test-secret-key" not in str(error_info.value)
+
+
+@respx.mock
+def test_transport_error_retries_then_succeeds() -> None:
+    # 첫 2회 ConnectTimeout 후 3회차 정상 응답 → 재시도로 복구되고 총 3회 호출된다.
+    route = respx.get(KOSIS_PARAM_URL).mock(
+        side_effect=[
+            httpx.ConnectTimeout("connect timed out"),
+            httpx.ConnectTimeout("connect timed out"),
+            httpx.Response(200, json=[build_source_row("200601", "463.8095317")]),
+        ]
+    )
+
+    price_rows = fetch_real_estate_prices(
+        kosis_api_key="test-kosis-key",
+        indicator_id="re-1",
+        periods_count=400,
+        http_client=httpx.Client(),
+    )
+
+    assert route.call_count == 3
+    assert [row["price_date"] for row in price_rows] == [date(2006, 1, 1)]
+    assert price_rows[0]["close_price"] == Decimal("463.8095317") * Decimal("59") * Decimal("10000")
+
+
+@respx.mock
+def test_transport_error_exhausts_retries_and_raises() -> None:
+    # 3회 모두 ConnectTimeout → 재시도 소진 후 도메인 에러. 키 미노출·정확히 3회 시도.
+    route = respx.get(KOSIS_PARAM_URL).mock(
+        side_effect=[
+            httpx.ConnectTimeout("connect timed out"),
+            httpx.ConnectTimeout("connect timed out"),
+            httpx.ConnectTimeout("connect timed out"),
+        ]
+    )
+
+    with pytest.raises(RealEstateFetchError) as error_info:
+        fetch_real_estate_prices(
+            kosis_api_key="test-secret-key",
+            indicator_id="re-1",
+            periods_count=400,
+            http_client=httpx.Client(),
+        )
+
+    assert route.call_count == 3
     assert "요청 실패" in str(error_info.value)
     assert "test-secret-key" not in str(error_info.value)
