@@ -29,14 +29,20 @@ def build_backfill_arguments(
     start_date: str = "2026-01-01",
     indicator: str | None = None,
     dry_run: bool = False,
+    skip_real_estate: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
-        start_date=start_date, indicator=indicator, dry_run=dry_run
+        start_date=start_date,
+        indicator=indicator,
+        dry_run=dry_run,
+        skip_real_estate=skip_real_estate,
     )
 
 
-def build_daily_arguments(dry_run: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(dry_run=dry_run)
+def build_daily_arguments(
+    dry_run: bool = False, skip_real_estate: bool = False
+) -> argparse.Namespace:
+    return argparse.Namespace(dry_run=dry_run, skip_real_estate=skip_real_estate)
 
 
 def build_stock_indicator(
@@ -412,6 +418,11 @@ def test_backfill_with_kosis_key_appends_real_estate_after_stocks(
 
     monkeypatch.setattr(main_module, "fetch_stock_daily_prices", fake_fetch_stock)
     monkeypatch.setattr(main_module, "fetch_real_estate_prices", fake_fetch_real_estate)
+    # 부동산 soft-fail 경로가 신선도 판정을 위해 최신일을 조회한다. 신선한 날짜라 지연 알림은 없다.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 6, 1),
+    )
     monkeypatch.setattr(main_module, "upsert_exchange_rates", lambda client, rows: len(rows))
     monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
 
@@ -448,6 +459,11 @@ def test_backfill_real_estate_filter_matches_indicator(patched_runtime, monkeypa
         return [build_real_estate_price_row(indicator_id, date(2006, 1, 1))]
 
     monkeypatch.setattr(main_module, "fetch_real_estate_prices", fake_fetch_real_estate)
+    # 명시적 --indicator 부동산 필터 경로에서도 soft-fail 신선도 판정이 최신일을 조회한다.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 6, 1),
+    )
     monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
 
     main_module.run_backfill(
@@ -473,11 +489,16 @@ def test_daily_real_estate_recollects_recent_periods(patched_runtime, monkeypatc
     monkeypatch.setattr(
         main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
     )
+
+    def fake_fetch_latest_price_date(client, indicator_id):
+        # 부동산은 증분 시작일 계산엔 쓰지 않지만, soft-fail 신선도 판정엔 최신일을 조회한다.
+        # 신선한 날짜를 돌려줘 지연 알림 없이 정상 종료하게 한다. 그 외 지표는 호출되면 안 된다.
+        if indicator_id == "re-1":
+            return date(2026, 6, 1)
+        pytest.fail("부동산 외 지표에는 latest 조회가 일어나면 안 된다")
+
     monkeypatch.setattr(
-        main_module, "fetch_latest_price_date",
-        lambda client, indicator_id: pytest.fail(
-            "부동산은 latest 증분 로직을 타지 않아야 한다"
-        ),
+        main_module, "fetch_latest_price_date", fake_fetch_latest_price_date
     )
 
     def fake_fetch_real_estate(kosis_api_key, indicator_id, periods_count):
@@ -491,10 +512,120 @@ def test_daily_real_estate_recollects_recent_periods(patched_runtime, monkeypatc
     )
     monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
 
+    # 부동산 수집 성공 + 데이터 신선 → soft-fail 정상 종료(SystemExit 없음).
     main_module.run_daily(build_daily_arguments())
 
     # 부동산은 최신 여부와 무관하게 항상 최근 개월 수로 재수집한다.
     assert real_estate_periods == [main_module.REAL_ESTATE_DAILY_PERIODS]
+
+
+def test_daily_real_estate_fetch_failure_is_soft_fail_when_data_fresh(
+    patched_runtime, monkeypatch
+):
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    # 환율은 이미 최신이라 수집을 건너뛴다.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+
+    def failing_real_estate(kosis_api_key, indicator_id, periods_count):
+        raise RuntimeError("KOSIS 요청 실패: ConnectTimeout")
+
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
+    # 수집은 실패했지만 DB 최신일은 today에 가까워(신선) 지연 알림 대상이 아니다.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 6, 1),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    # 부동산 수집 실패는 soft-fail이므로 데이터가 신선하면 SystemExit 없이 정상 종료한다.
+    main_module.run_daily(build_daily_arguments())
+
+
+def test_daily_real_estate_stale_data_triggers_failure(
+    patched_runtime, monkeypatch, tmp_path
+):
+    summary_file = tmp_path / "collect-failures.txt"
+    monkeypatch.setenv("COLLECT_FAILURE_SUMMARY_FILE", str(summary_file))
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+    # 부동산 수집 자체는 성공하지만 DB 최신일이 임계(62일) 초과로 오래됐다(193일 경과).
+    monkeypatch.setattr(
+        main_module, "fetch_real_estate_prices",
+        lambda kosis_api_key, indicator_id, periods_count: [
+            build_real_estate_price_row(indicator_id, date(2026, 1, 1))
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 1, 1),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_daily(build_daily_arguments())
+
+    assert exit_info.value.code == 1
+    assert summary_file.exists()
+    summary_content = summary_file.read_text(encoding="utf-8")
+    assert "real_estate:seoul-small" in summary_content
+    assert "부동산 데이터 지연" in summary_content
+
+
+def test_daily_skip_real_estate_excludes_real_estate(patched_runtime, monkeypatch):
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    # --skip-real-estate 지정 시 KOSIS 키가 있어도 부동산 목록/수집이 일어나면 안 된다.
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: pytest.fail(
+            "--skip-real-estate 지정 시 부동산 지표 목록을 조회하면 안 된다"
+        ),
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_real_estate_prices",
+        lambda *args, **kwargs: pytest.fail(
+            "--skip-real-estate 지정 시 부동산을 수집하면 안 된다"
+        ),
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+
+    main_module.run_daily(build_daily_arguments(skip_real_estate=True))
 
 
 def test_daily_failure_writes_summary_file(patched_runtime, monkeypatch, tmp_path):
@@ -514,7 +645,7 @@ def test_daily_failure_writes_summary_file(patched_runtime, monkeypatch, tmp_pat
             )
         ],
     )
-    # 환율은 이미 최신이라 수집을 건너뛰고, 부동산만 실패시킨다.
+    # 환율은 이미 최신이라 수집을 건너뛰고, 부동산은 수집 실패 + 데이터도 임계 초과로 밀려 exit 1.
     monkeypatch.setattr(
         main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
     )
@@ -523,6 +654,11 @@ def test_daily_failure_writes_summary_file(patched_runtime, monkeypatch, tmp_pat
         raise RuntimeError("KOSIS 요청 실패: ConnectTimeout")
 
     monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
+    # 부동산 수집이 실패했고 DB 최신일도 임계(62일) 초과로 오래됐다(193일 경과) → 지연 알림.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 1, 1),
+    )
     monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
 
     with pytest.raises(SystemExit) as exit_info:
@@ -532,7 +668,7 @@ def test_daily_failure_writes_summary_file(patched_runtime, monkeypatch, tmp_pat
     assert summary_file.exists()
     summary_content = summary_file.read_text(encoding="utf-8")
     assert "real_estate:seoul-small" in summary_content
-    assert "KOSIS 요청 실패" in summary_content
+    assert "부동산 데이터 지연" in summary_content
 
 
 def test_daily_failure_without_summary_env_skips_file(
@@ -561,6 +697,11 @@ def test_daily_failure_without_summary_env_skips_file(
         raise RuntimeError("KOSIS 요청 실패: ConnectTimeout")
 
     monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
+    # 부동산 수집 실패 + 데이터도 임계 초과로 밀려 exit 1 상황(요약 파일 경로만 미설정).
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 1, 1),
+    )
     monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
 
     with pytest.raises(SystemExit) as exit_info:

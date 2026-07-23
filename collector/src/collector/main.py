@@ -37,6 +37,12 @@ TASK_KIND_REAL_ESTATE = "real_estate"
 REAL_ESTATE_BACKFILL_PERIODS = 400
 REAL_ESTATE_DAILY_PERIODS = 4
 
+# 부동산은 월간 통계라 하루 수집 실패는 데이터 손실이 없다(다음 실행이 자동 복구).
+# 그래서 일시적 수집 실패는 배치를 실패시키지 않고(soft-fail), DB에 쌓인 최신 데이터가
+# 아래 임계값보다 오래됐을 때만 진짜 문제로 보고 알림한다.
+# 62일 = 월간 데이터 주기(~30일) + KOSIS 발표 시차/지연 여유(~30일). 정상 발표 시차로 인한 오탐 방지.
+REAL_ESTATE_STALENESS_THRESHOLD_DAYS = 62
+
 
 @dataclass(frozen=True)
 class CollectionTask:
@@ -97,22 +103,28 @@ def _build_real_estate_task(indicator: dict) -> CollectionTask:
 
 
 def build_collection_tasks(
-    supabase_client, indicator_filter: str | None, kosis_api_key: str | None
+    supabase_client,
+    indicator_filter: str | None,
+    kosis_api_key: str | None,
+    skip_real_estate: bool = False,
 ) -> list[CollectionTask] | None:
     """수집할 지표 작업 목록을 만든다. 환율 → 주식 → 부동산 순서를 유지한다.
 
     부동산 태스크는 KOSIS 키가 있을 때만 추가한다(키가 없으면 안내 후 건너뜀).
+    skip_real_estate=True면 KOSIS 키가 있어도 부동산 태스크를 추가하지 않는다.
     지표 식별자를 해석할 수 없거나 매칭되는 지표가 없으면 안내를 출력하고 None을 반환한다.
     """
     if indicator_filter is None:
         collection_tasks = [_build_exchange_rate_task()]
         for indicator in fetch_active_stock_indicators(supabase_client):
             collection_tasks.append(_build_stock_task(indicator))
-        if kosis_api_key:
+        if not kosis_api_key:
+            print("KOSIS_KEY가 설정되지 않아 부동산 지표 수집을 건너뜁니다.")
+        elif skip_real_estate:
+            print("--skip-real-estate 지정으로 부동산(KOSIS) 지표 수집을 건너뜁니다.")
+        else:
             for indicator in fetch_active_real_estate_indicators(supabase_client):
                 collection_tasks.append(_build_real_estate_task(indicator))
-        else:
-            print("KOSIS_KEY가 설정되지 않아 부동산 지표 수집을 건너뜁니다.")
         return collection_tasks
 
     if indicator_filter == EXCHANGE_RATE_INDICATOR_KEY:
@@ -275,6 +287,64 @@ def _write_failure_summary(failure_lines: list[str]) -> None:
         )
 
 
+def _real_estate_staleness_days(latest_price_date: date | None, today: date) -> int | None:
+    """부동산 지표의 DB 최신일이 today 기준 며칠 경과했는지 반환한다.
+    저장된 데이터가 없으면(None) 판정 불가로 None을 반환한다(backfill 안내 대상)."""
+    if latest_price_date is None:
+        return None
+    return (today - latest_price_date).days
+
+
+def _process_real_estate_task(
+    task: CollectionTask,
+    kis_client: KisClient,
+    config,
+    supabase_client,
+    today: date,
+    periods_count: int,
+    dry_run: bool,
+) -> tuple[bool, str | None]:
+    """부동산 태스크를 soft-fail 방식으로 처리한다.
+
+    부동산은 월간 통계라 하루 수집 실패는 데이터 손실이 없으므로(다음 실행이 자동 복구)
+    수집 예외는 배치를 실패시키지 않고 경고만 남긴다. 대신 수집 이후 DB에 쌓인 최신
+    데이터가 임계값보다 오래됐을 때만 진짜 지연 문제로 보고한다.
+    반환값은 (신선도 지연으로 인한 실패 여부, 실패 요약 라인 or None)이다.
+    """
+    # 부동산 수집/upsert는 실패해도 배치를 죽이지 않는다(비필수). 최근 개월 수로 재수집해
+    # 통계 개정분을 멱등 upsert한다.
+    try:
+        rows = _collect_task_rows(
+            task, kis_client, config, today, today, periods_count
+        )
+        if not dry_run:
+            _upsert_task_rows(task, supabase_client, rows)
+        summary_start, summary_end = _summary_range(task, today, today, rows)
+        _print_task_summary(task, summary_start, summary_end, rows, dry_run)
+    except Exception as collection_error:
+        print(
+            f"[{task.key}] 수집 실패(비필수, 건너뜀): {collection_error}",
+            file=sys.stderr,
+        )
+
+    # 수집 성공/실패와 무관하게 DB 최신일로 신선도를 판정한다.
+    # 방금 수집이 성공했다면 새 최신일이 반영되므로 정상이면 지연으로 잡히지 않는다.
+    latest_price_date = fetch_latest_price_date(supabase_client, task.indicator_id)
+    staleness_days = _real_estate_staleness_days(latest_price_date, today)
+    if staleness_days is None:
+        # 저장된 데이터가 없으면 지연 알림 대신 로그만 남긴다(먼저 backfill 실행 대상).
+        print(f"[{task.key}] 저장된 부동산 데이터가 없습니다. 먼저 backfill을 실행하세요.")
+        return False, None
+    if staleness_days > REAL_ESTATE_STALENESS_THRESHOLD_DAYS:
+        failure_line = (
+            f"[{task.key}] 부동산 데이터 지연: 최신 {latest_price_date}, "
+            f"{staleness_days}일 경과(임계 {REAL_ESTATE_STALENESS_THRESHOLD_DAYS}일)"
+        )
+        print(failure_line, file=sys.stderr)
+        return True, failure_line
+    return False, None
+
+
 def run_backfill(arguments: argparse.Namespace) -> None:
     start_date = _parse_start_date(arguments.start_date)
     end_date = get_today_date()
@@ -288,7 +358,8 @@ def run_backfill(arguments: argparse.Namespace) -> None:
     kis_client, supabase_client, config = _create_runtime_clients()
 
     collection_tasks = build_collection_tasks(
-        supabase_client, arguments.indicator, config.kosis_api_key
+        supabase_client, arguments.indicator, config.kosis_api_key,
+        skip_real_estate=arguments.skip_real_estate,
     )
     if collection_tasks is None:
         sys.exit(1)
@@ -296,8 +367,18 @@ def run_backfill(arguments: argparse.Namespace) -> None:
     had_failure = False
     failure_summary_lines: list[str] = []
     for task in collection_tasks:
+        if task.kind == TASK_KIND_REAL_ESTATE:
+            # 부동산은 soft-fail. 수집 실패는 배치를 죽이지 않고, 데이터가 오래됐을 때만 실패로 본다.
+            # backfill도 today 기준으로 신선도를 판정한다(부동산은 월 데이터).
+            stale_failure, failure_line = _process_real_estate_task(
+                task, kis_client, config, supabase_client, end_date,
+                REAL_ESTATE_BACKFILL_PERIODS, arguments.dry_run,
+            )
+            if stale_failure:
+                had_failure = True
+                failure_summary_lines.append(failure_line)
+            continue
         try:
-            # 부동산은 start/end를 무시하고 전량(REAL_ESTATE_BACKFILL_PERIODS)을 수집한다.
             rows = _collect_task_rows(
                 task, kis_client, config, start_date, end_date,
                 REAL_ESTATE_BACKFILL_PERIODS,
@@ -321,26 +402,28 @@ def run_daily(arguments: argparse.Namespace) -> None:
 
     kis_client, supabase_client, config = _create_runtime_clients()
 
-    collection_tasks = build_collection_tasks(supabase_client, None, config.kosis_api_key)
+    collection_tasks = build_collection_tasks(
+        supabase_client, None, config.kosis_api_key,
+        skip_real_estate=arguments.skip_real_estate,
+    )
     if collection_tasks is None:
         sys.exit(1)
 
     had_failure = False
     failure_summary_lines: list[str] = []
     for task in collection_tasks:
+        if task.kind == TASK_KIND_REAL_ESTATE:
+            # 부동산은 soft-fail. 증분 로직 대신 최근 몇 개월을 재수집해 개정분을 멱등 upsert하고,
+            # 수집이 실패해도 데이터가 오래됐을 때만 실패로 본다.
+            stale_failure, failure_line = _process_real_estate_task(
+                task, kis_client, config, supabase_client, end_date,
+                REAL_ESTATE_DAILY_PERIODS, arguments.dry_run,
+            )
+            if stale_failure:
+                had_failure = True
+                failure_summary_lines.append(failure_line)
+            continue
         try:
-            if task.kind == TASK_KIND_REAL_ESTATE:
-                # 부동산은 증분 로직을 타지 않고 최근 몇 개월을 재수집해 개정분을 멱등 upsert한다.
-                rows = _collect_task_rows(
-                    task, kis_client, config, end_date, end_date,
-                    REAL_ESTATE_DAILY_PERIODS,
-                )
-                if not arguments.dry_run:
-                    _upsert_task_rows(task, supabase_client, rows)
-                summary_start, summary_end = _summary_range(task, end_date, end_date, rows)
-                _print_task_summary(task, summary_start, summary_end, rows, arguments.dry_run)
-                continue
-
             latest_date = _fetch_latest_date_for_task(task, supabase_client)
             if latest_date is None:
                 print(
@@ -400,6 +483,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="적재 없이 수집 결과만 확인한다",
     )
+    backfill_parser.add_argument(
+        "--skip-real-estate",
+        dest="skip_real_estate",
+        action="store_true",
+        help="부동산(KOSIS) 지표 수집을 건너뛴다",
+    )
     backfill_parser.set_defaults(handler=run_backfill)
 
     daily_parser = subparsers.add_parser(
@@ -411,6 +500,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         action="store_true",
         help="적재 없이 수집 결과만 확인한다",
+    )
+    daily_parser.add_argument(
+        "--skip-real-estate",
+        dest="skip_real_estate",
+        action="store_true",
+        help="부동산(KOSIS) 지표 수집을 건너뛴다",
     )
     daily_parser.set_defaults(handler=run_daily)
 
