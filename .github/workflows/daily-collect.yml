@@ -40,7 +40,14 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           COLLECT_FAILURE_SUMMARY_FILE: ${{ runner.temp }}/collect-failures.txt
-        run: python -m collector.main daily
+        run: |
+          if [ "$(date -u +%u)" = "1" ]; then
+            echo "월요일: 부동산 포함 전체 수집"
+            python -m collector.main daily
+          else
+            echo "화~금: 부동산 제외 수집(부동산은 주 1회 월요일에만)"
+            python -m collector.main daily --skip-real-estate
+          fi
 
       - name: 실패 시 텔레그램 알림
         if: failure()
