@@ -360,6 +360,122 @@ def build_real_estate_price_row(indicator_id: str, price_date: date) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "today, latest_price_date, expected_months",
+    [
+        # 공표주기 익익월 기준 정상 순환 범위(2~3개월)는 지연이 아니다.
+        # 현재 프로덕션 상태: 오늘 2026-08, 최신 2026-05 → 3개월(정상, 임계 3 이하).
+        (date(2026, 8, 10), date(2026, 5, 1), 3),
+        # 임계(3)를 초과하는 4개월 → 진짜 지연.
+        (date(2026, 8, 10), date(2026, 4, 1), 4),
+        # 연 경계: 오늘 2027-01, 최신 2026-10 → 3개월(정상).
+        (date(2027, 1, 15), date(2026, 10, 1), 3),
+        # 연 경계: 오늘 2027-01, 최신 2026-09 → 4개월(지연).
+        (date(2027, 1, 15), date(2026, 9, 1), 4),
+    ],
+)
+def test_real_estate_staleness_months_counts_calendar_months(
+    today, latest_price_date, expected_months
+):
+    # 경과 일수가 아니라 달력 월 차이(연*12 + 월차)로 계산한다.
+    assert (
+        main_module._real_estate_staleness_months(latest_price_date, today)
+        == expected_months
+    )
+
+
+def test_real_estate_staleness_months_returns_none_without_data():
+    # 저장된 데이터가 없으면(None) 판정 불가로 None을 반환한다(backfill 안내 대상).
+    assert (
+        main_module._real_estate_staleness_months(None, date(2026, 8, 10)) is None
+    )
+
+
+def test_daily_real_estate_month_diff_3_is_normal(patched_runtime, monkeypatch):
+    # 경계: 오늘과 최신 데이터월의 차이가 임계(3)와 같으면 정상 → 지연 알림 없이 종료.
+    monkeypatch.setattr(main_module, "get_today_date", lambda: date(2026, 8, 10))
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: date(2026, 8, 10)
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_real_estate_prices",
+        lambda kosis_api_key, indicator_id, periods_count: [
+            build_real_estate_price_row(indicator_id, date(2026, 5, 1))
+        ],
+    )
+    # 최신 2026-05, 오늘 2026-08 → 3개월(정상).
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 5, 1),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    # 정상이면 SystemExit 없이 종료해야 한다.
+    main_module.run_daily(build_daily_arguments())
+
+
+def test_daily_real_estate_month_diff_4_triggers_failure(
+    patched_runtime, monkeypatch, tmp_path
+):
+    # 경계: 차이가 임계(3)를 초과하는 4개월이면 지연 알림.
+    summary_file = tmp_path / "collect-failures.txt"
+    monkeypatch.setenv("COLLECT_FAILURE_SUMMARY_FILE", str(summary_file))
+    monkeypatch.setattr(main_module, "get_today_date", lambda: date(2026, 8, 10))
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: date(2026, 8, 10)
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_real_estate_prices",
+        lambda kosis_api_key, indicator_id, periods_count: [
+            build_real_estate_price_row(indicator_id, date(2026, 4, 1))
+        ],
+    )
+    # 최신 2026-04, 오늘 2026-08 → 4개월(지연).
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 4, 1),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_daily(build_daily_arguments())
+
+    assert exit_info.value.code == 1
+    summary_content = summary_file.read_text(encoding="utf-8")
+    assert "부동산 데이터 지연" in summary_content
+    # 최신 데이터월과 경과 개월 수가 알림 본문에 드러나야 한다.
+    assert "2026-04월분" in summary_content
+    assert "4개월 경과" in summary_content
+
+
 def test_backfill_without_kosis_key_skips_real_estate(patched_runtime, monkeypatch):
     monkeypatch.setattr(
         main_module, "load_config", lambda: build_fake_config(kosis_api_key=None)
@@ -578,7 +694,8 @@ def test_daily_real_estate_stale_data_triggers_failure(
     monkeypatch.setattr(
         main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
     )
-    # 부동산 수집 자체는 성공하지만 DB 최신일이 임계(62일) 초과로 오래됐다(193일 경과).
+    # 부동산 수집 자체는 성공하지만 DB 최신일(2026-01)이 오늘(2026-07) 기준 6개월 경과로
+    # 임계 3개월을 초과해 오래됐다(공표주기 익익월 기준 정상 순환 범위인 2~3개월을 벗어남).
     monkeypatch.setattr(
         main_module, "fetch_real_estate_prices",
         lambda kosis_api_key, indicator_id, periods_count: [
@@ -654,7 +771,8 @@ def test_daily_failure_writes_summary_file(patched_runtime, monkeypatch, tmp_pat
         raise RuntimeError("KOSIS 요청 실패: ConnectTimeout")
 
     monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
-    # 부동산 수집이 실패했고 DB 최신일도 임계(62일) 초과로 오래됐다(193일 경과) → 지연 알림.
+    # 부동산 수집이 실패했고 DB 최신일(2026-01)도 오늘(2026-07) 기준 6개월 경과로 임계 3개월
+    # 초과라 오래됐다 → 지연 알림.
     monkeypatch.setattr(
         main_module, "fetch_latest_price_date",
         lambda client, indicator_id: date(2026, 1, 1),

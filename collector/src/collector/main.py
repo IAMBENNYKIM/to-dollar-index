@@ -38,10 +38,13 @@ REAL_ESTATE_BACKFILL_PERIODS = 400
 REAL_ESTATE_DAILY_PERIODS = 4
 
 # 부동산은 월간 통계라 하루 수집 실패는 데이터 손실이 없다(다음 실행이 자동 복구).
-# 그래서 일시적 수집 실패는 배치를 실패시키지 않고(soft-fail), DB에 쌓인 최신 데이터가
-# 아래 임계값보다 오래됐을 때만 진짜 문제로 보고 알림한다.
-# 62일 = 월간 데이터 주기(~30일) + KOSIS 발표 시차/지연 여유(~30일). 정상 발표 시차로 인한 오탐 방지.
-REAL_ESTATE_STALENESS_THRESHOLD_DAYS = 62
+# 그래서 일시적 수집 실패는 배치를 실패시키지 않고(soft-fail), DB에 쌓인 최신 데이터의
+# 신선도만 판정한다. 판정 기준은 경과 일수가 아니라 오늘과 최신 데이터월의 달력 월 차이다.
+# KOSIS 공표주기가 작성기준 월의 익익월(M월분 → M+2월 발표)이라, 정상 상태에서도 오늘과
+# 최신 데이터월의 차이는 2~3개월을 순환한다. 따라서 임계 3을 초과(=4개월 이상)할 때만
+# 진짜 발표 지연으로 보고 알림한다. 경과 일수 임계는 정상 발표 시차에서도 오탐을 냈다.
+# 참고: 전세 통계(익익익월)를 추가하면 정상 월 차이가 한 달 더 늘어 임계 4가 필요하다.
+REAL_ESTATE_STALENESS_THRESHOLD_MONTHS = 3
 
 
 @dataclass(frozen=True)
@@ -287,12 +290,15 @@ def _write_failure_summary(failure_lines: list[str]) -> None:
         )
 
 
-def _real_estate_staleness_days(latest_price_date: date | None, today: date) -> int | None:
-    """부동산 지표의 DB 최신일이 today 기준 며칠 경과했는지 반환한다.
+def _real_estate_staleness_months(latest_price_date: date | None, today: date) -> int | None:
+    """부동산 지표의 DB 최신일이 today 기준 몇 개월(달력 월 차이) 경과했는지 반환한다.
+
+    경과 일수가 아니라 (연*12 + 월)의 차이인 달력 월 차이를 쓴다. KOSIS 공표주기가
+    익익월이라 정상 상태에서도 월 차이가 2~3을 순환하기 때문이다(경과 일수는 오탐 유발).
     저장된 데이터가 없으면(None) 판정 불가로 None을 반환한다(backfill 안내 대상)."""
     if latest_price_date is None:
         return None
-    return (today - latest_price_date).days
+    return (today.year - latest_price_date.year) * 12 + (today.month - latest_price_date.month)
 
 
 def _process_real_estate_task(
@@ -330,15 +336,15 @@ def _process_real_estate_task(
     # 수집 성공/실패와 무관하게 DB 최신일로 신선도를 판정한다.
     # 방금 수집이 성공했다면 새 최신일이 반영되므로 정상이면 지연으로 잡히지 않는다.
     latest_price_date = fetch_latest_price_date(supabase_client, task.indicator_id)
-    staleness_days = _real_estate_staleness_days(latest_price_date, today)
-    if staleness_days is None:
+    staleness_months = _real_estate_staleness_months(latest_price_date, today)
+    if staleness_months is None:
         # 저장된 데이터가 없으면 지연 알림 대신 로그만 남긴다(먼저 backfill 실행 대상).
         print(f"[{task.key}] 저장된 부동산 데이터가 없습니다. 먼저 backfill을 실행하세요.")
         return False, None
-    if staleness_days > REAL_ESTATE_STALENESS_THRESHOLD_DAYS:
+    if staleness_months > REAL_ESTATE_STALENESS_THRESHOLD_MONTHS:
         failure_line = (
-            f"[{task.key}] 부동산 데이터 지연: 최신 {latest_price_date}, "
-            f"{staleness_days}일 경과(임계 {REAL_ESTATE_STALENESS_THRESHOLD_DAYS}일)"
+            f"[{task.key}] 부동산 데이터 지연: 최신 {latest_price_date:%Y-%m}월분, "
+            f"{staleness_months}개월 경과(임계 {REAL_ESTATE_STALENESS_THRESHOLD_MONTHS}개월, 공표주기 익익월)"
         )
         print(failure_line, file=sys.stderr)
         return True, failure_line
