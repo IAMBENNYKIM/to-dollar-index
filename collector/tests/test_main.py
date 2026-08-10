@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from collector import main as main_module
+from collector.fetch_real_estate import RealEstateFetchError
 from collector.kis_client import KisQuotationError
 
 FIXED_TODAY = date(2026, 7, 13)
@@ -716,6 +717,148 @@ def test_daily_real_estate_stale_data_triggers_failure(
     summary_content = summary_file.read_text(encoding="utf-8")
     assert "real_estate:seoul-small" in summary_content
     assert "부동산 데이터 지연" in summary_content
+
+
+def test_daily_stale_alert_appends_collection_success(
+    patched_runtime, monkeypatch, tmp_path
+):
+    # 지연 + 당일 수집 성공 경로: 알림에 수집 성공과 소스 최신 발표분 월이 부기돼야 한다.
+    summary_file = tmp_path / "collect-failures.txt"
+    monkeypatch.setenv("COLLECT_FAILURE_SUMMARY_FILE", str(summary_file))
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+    # 수집은 성공하고 소스가 2026-04월분까지 내려주지만, DB 최신일(2026-01)은 오늘(2026-07)
+    # 기준 6개월 경과라 지연이다. 즉 소스 발표 자체가 밀린 상황(대기 대상).
+    monkeypatch.setattr(
+        main_module, "fetch_real_estate_prices",
+        lambda kosis_api_key, indicator_id, periods_count: [
+            build_real_estate_price_row(indicator_id, date(2026, 4, 1))
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 1, 1),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_daily(build_daily_arguments())
+
+    assert exit_info.value.code == 1
+    summary_content = summary_file.read_text(encoding="utf-8")
+    assert "부동산 데이터 지연" in summary_content
+    assert "수집 성공" in summary_content
+    # 소스 최신 발표분(마지막 수집 행의 월)이 부기돼야 한다.
+    assert "2026-04월" in summary_content
+
+
+def test_daily_stale_alert_appends_collection_failure_cause(
+    patched_runtime, monkeypatch, tmp_path
+):
+    # 지연 + 당일 수집 실패 경로: 알림에 수집 실패와 원인이 부기돼야 한다.
+    # RealEstateFetchError는 메시지에 시크릿이 없으므로 원문 그대로 부기한다.
+    summary_file = tmp_path / "collect-failures.txt"
+    monkeypatch.setenv("COLLECT_FAILURE_SUMMARY_FILE", str(summary_file))
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+
+    def failing_real_estate(kosis_api_key, indicator_id, periods_count):
+        raise RealEstateFetchError("KOSIS HTTP 500 오류")
+
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
+    # DB 최신일(2026-01)이 오늘(2026-07) 기준 6개월 경과라 지연. 수집까지 실패했으므로
+    # 소스 발표 지연이 아니라 수집 문제(조치 필요)일 수 있다.
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 1, 1),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_daily(build_daily_arguments())
+
+    assert exit_info.value.code == 1
+    summary_content = summary_file.read_text(encoding="utf-8")
+    assert "부동산 데이터 지연" in summary_content
+    assert "수집 실패" in summary_content
+    assert "KOSIS HTTP 500 오류" in summary_content
+
+
+def test_daily_stale_alert_masks_non_fetch_error_cause(
+    patched_runtime, monkeypatch, tmp_path
+):
+    # 지연 + RealEstateFetchError가 아닌 예외: 시크릿 유출 방지를 위해 타입명만 부기한다.
+    summary_file = tmp_path / "collect-failures.txt"
+    monkeypatch.setenv("COLLECT_FAILURE_SUMMARY_FILE", str(summary_file))
+    monkeypatch.setattr(
+        main_module, "load_config", lambda: build_fake_config(kosis_api_key="kosis-key")
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_stock_indicators", lambda client: []
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_active_real_estate_indicators",
+        lambda client: [
+            build_real_estate_indicator(
+                "real_estate:seoul-small", "DT_KAB_11672_S19", "서울 소형"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module, "fetch_latest_exchange_rate_date", lambda client: FIXED_TODAY
+    )
+
+    secret_bearing_message = "apiKey=super-secret-value 로 요청 실패"
+
+    def failing_real_estate(kosis_api_key, indicator_id, periods_count):
+        raise ValueError(secret_bearing_message)
+
+    monkeypatch.setattr(main_module, "fetch_real_estate_prices", failing_real_estate)
+    monkeypatch.setattr(
+        main_module, "fetch_latest_price_date",
+        lambda client, indicator_id: date(2026, 1, 1),
+    )
+    monkeypatch.setattr(main_module, "upsert_daily_prices", lambda client, rows: len(rows))
+
+    with pytest.raises(SystemExit) as exit_info:
+        main_module.run_daily(build_daily_arguments())
+
+    assert exit_info.value.code == 1
+    summary_content = summary_file.read_text(encoding="utf-8")
+    assert "수집 실패" in summary_content
+    # 타입명만 남고 메시지 본문(시크릿 포함)은 새지 않아야 한다.
+    assert "ValueError" in summary_content
+    assert secret_bearing_message not in summary_content
 
 
 def test_daily_skip_real_estate_excludes_real_estate(patched_runtime, monkeypatch):

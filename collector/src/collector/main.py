@@ -18,7 +18,7 @@ from collector.database_writer import (
 )
 from collector.fetch_exchange_rates import fetch_usd_krw_exchange_rates
 from collector.fetch_exchange_rates_ecos import fetch_usd_krw_exchange_rates_ecos
-from collector.fetch_real_estate import fetch_real_estate_prices
+from collector.fetch_real_estate import RealEstateFetchError, fetch_real_estate_prices
 from collector.fetch_stock_prices import fetch_stock_daily_prices
 from collector.kis_auth import get_access_token
 from collector.kis_client import KisClient, KisQuotationError
@@ -319,6 +319,9 @@ def _process_real_estate_task(
     """
     # 부동산 수집/upsert는 실패해도 배치를 죽이지 않는다(비필수). 최근 개월 수로 재수집해
     # 통계 개정분을 멱등 upsert한다.
+    # soft-fail로 삼킨 당일 수집 결과(성공/실패)는 지연 판정 시 알림에 부기하기 위해 보관한다.
+    # 부기가 있으면 소스 발표 지연(대기)인지, 수집 문제(조치 필요)인지 운영자가 구분할 수 있다.
+    collection_note: str | None = None
     try:
         rows = _collect_task_rows(
             task, kis_client, config, today, today, periods_count
@@ -327,10 +330,30 @@ def _process_real_estate_task(
             _upsert_task_rows(task, supabase_client, rows)
         summary_start, summary_end = _summary_range(task, today, today, rows)
         _print_task_summary(task, summary_start, summary_end, rows, dry_run)
+        if rows:
+            # 소스가 실제로 내려준 최신 발표분(마지막 행의 월). 이게 오늘까지 밀려 있으면
+            # 우리 수집이 아니라 소스 발표가 지연된 것이므로 대기 대상이다.
+            source_latest_price_date = rows[-1]["price_date"]
+            collection_note = (
+                f"\n  ㄴ 금일 KOSIS 수집 성공 — 소스 최신 발표분 "
+                f"{source_latest_price_date:%Y-%m}월 (소스 발표 지연, 대기)"
+            )
+        else:
+            collection_note = "\n  ㄴ 금일 KOSIS 수집 성공 — 0건"
     except Exception as collection_error:
         print(
             f"[{task.key}] 수집 실패(비필수, 건너뜀): {collection_error}",
             file=sys.stderr,
+        )
+        # 원인 문자열은 시크릿 유출을 막기 위해 선별해 부기한다. RealEstateFetchError는
+        # 메시지에 API 키가 포함되지 않도록 만들어졌으므로 그대로 쓰고, 그 밖의 예외는
+        # 메시지 본문을 신뢰할 수 없어 타입명만 남긴다.
+        if isinstance(collection_error, RealEstateFetchError):
+            failure_cause = str(collection_error)
+        else:
+            failure_cause = type(collection_error).__name__
+        collection_note = (
+            f"\n  ㄴ 금일 KOSIS 수집 실패 — {failure_cause} (수집 문제 가능성, 조치 필요)"
         )
 
     # 수집 성공/실패와 무관하게 DB 최신일로 신선도를 판정한다.
@@ -346,6 +369,9 @@ def _process_real_estate_task(
             f"[{task.key}] 부동산 데이터 지연: 최신 {latest_price_date:%Y-%m}월분, "
             f"{staleness_months}개월 경과(임계 {REAL_ESTATE_STALENESS_THRESHOLD_MONTHS}개월, 공표주기 익익월)"
         )
+        # 당일 수집 결과를 개행으로 부기해 소스 발표 지연과 수집 문제를 구분할 수 있게 한다.
+        if collection_note is not None:
+            failure_line += collection_note
         print(failure_line, file=sys.stderr)
         return True, failure_line
     return False, None
